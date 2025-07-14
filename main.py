@@ -1,11 +1,21 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 import os
 from utils import process_video_task
 
 app = Flask(__name__)
 
-@app.route('/', methods=['POST'])
+@app.after_request
+def apply_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+@app.route('/', methods=['POST', 'OPTIONS'])
 def handle_request():
+    if request.method == "OPTIONS":
+        return make_response('', 200)
+
     data = request.get_json()
 
     video_url = data.get("video_url")
@@ -23,6 +33,3 @@ def handle_request():
         return jsonify({"status": "processing_started"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
