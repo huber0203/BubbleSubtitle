@@ -37,6 +37,7 @@ def handle_request():
         language = data.get("whisper_language", "auto")
         max_segment_mb = data.get("max_segment_mb", 24)
         webhook_url = data.get("n8n_webhook")
+        prompt = data.get("prompt", "")  # 👈 新增支援 prompt
 
         # 檢查必要欄位
         if not all([video_url, task_id, webhook_url]):
@@ -55,7 +56,8 @@ def handle_request():
             "task_id": task_id,
             "language": language,
             "max_segment_mb": max_segment_mb,
-            "webhook_url": webhook_url
+            "webhook_url": webhook_url,
+            "prompt": prompt
         })
 
         # 呼叫任務處理邏輯
@@ -65,7 +67,8 @@ def handle_request():
             task_id=task_id,
             whisper_language=language,
             max_segment_mb=max_segment_mb,
-            webhook_url=webhook_url
+            webhook_url=webhook_url,
+            prompt=prompt  # 👈 傳進 utils
         )
 
         print("✅ 任務開始執行")
