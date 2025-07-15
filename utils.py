@@ -11,7 +11,7 @@ from datetime import timedelta, datetime
 import re
 
 # ✅ utils.py 版本
-UTILS_VERSION = "v1.2.5"
+UTILS_VERSION = "v1.2.6"
 
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
@@ -149,7 +149,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
                     logging.error(status)
 
             final_srt_path = os.path.join(tmpdir, "first.srt")
-            with open(final_srt_path, "w", encoding="utf-8") as f:
+            with open(final_srt_path, "w", encoding="utf-8-sig") as f:
                 f.write(output_srt.strip())
 
             try:
