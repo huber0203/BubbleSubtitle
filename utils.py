@@ -43,7 +43,7 @@ def split_audio(audio_path, max_mb):
         end_ms = len(audio)
         chunk = audio[start_ms:end_ms]
 
-        while len(chunk.raw_data) > max_bytes:
+        while len(chunk.raw_data) > max_bytes and end_ms - start_ms > 5000:
             end_ms -= 5000
             chunk = audio[start_ms:end_ms]
 
