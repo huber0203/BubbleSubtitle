@@ -3,3 +3,4 @@ requests
 ffmpeg-python
 pydub
 google-cloud-storage
+openai
