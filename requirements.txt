@@ -2,3 +2,4 @@ flask
 requests
 ffmpeg-python
 pydub
+google-cloud-storage
