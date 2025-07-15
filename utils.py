@@ -3,7 +3,7 @@ import requests
 import subprocess
 import tempfile
 import shutil
-from pydub import AudioSegment
+from typing import List
 
 def download_file(url, output_path):
     print(f"⬇️ 下載檔案：{url}")
@@ -13,44 +13,47 @@ def download_file(url, output_path):
     print(f"✅ 下載完成：{output_path}")
 
 def extract_audio(video_path, audio_path):
-    print("🎧 擷取音訊...")
-    command = ['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-ar', '16000', audio_path]
+    print("🎧 擷取音訊 (32kbps / 16kHz / mono)...")
+    command = [
+        'ffmpeg', '-i', video_path,
+        '-vn', '-ar', '16000', '-ac', '1',
+        '-b:a', '32k',
+        audio_path
+    ]
     subprocess.run(command, check=True)
     print("✅ 擷取完成：", audio_path)
 
-def split_audio_by_size(audio_path, max_size_mb):
-    print(f"✂️ 分割音訊為每段不超過 {max_size_mb}MB")
-
-    audio = AudioSegment.from_mp3(audio_path)
-    segment_paths = []
-
-    temp_dir = tempfile.mkdtemp()
-    max_bytes = max_size_mb * 1024 * 1024
-    current = 0
-    part = 1
-
-    while current < len(audio):
-        end = current + 60 * 1000  # 初始分 1 分鐘
-        while end < len(audio):
-            chunk = audio[current:end]
-            size = len(chunk.raw_data)
-            if size >= max_bytes:
-                break
-            end += 10 * 1000  # 每次往後加 10 秒
-
-        chunk = audio[current:end]
-        output_path = os.path.join(temp_dir, f"part{part}.mp3")
-        chunk.export(output_path, format="mp3")
-        segment_paths.append(output_path)
-        print(f"🧩 第 {part} 段完成，長度 {len(chunk) / 1000:.1f}s，儲存：{output_path}")
-
-        current = end
-        part += 1
-
-    return segment_paths
+def split_audio_by_ffmpeg(audio_path: str, max_size_mb: int) -> List[str]:
+    print(f"✂️ 使用 ffmpeg 切割音訊，每段最多 {max_size_mb}MB...")
+    output_dir = tempfile.mkdtemp()
+    segment_pattern = os.path.join(output_dir, "part_%03d.mp3")
+    
+    command = [
+        'ffmpeg', '-i', audio_path,
+        '-f', 'segment',
+        '-segment_size', str(max_size_mb * 1024),  # KB
+        '-c', 'copy',
+        segment_pattern
+    ]
+    subprocess.run(command, check=True)
+    
+    segments = sorted([
+        os.path.join(output_dir, f) 
+        for f in os.listdir(output_dir)
+        if f.endswith(".mp3")
+    ])
+    
+    print(f"✅ 共分割出 {len(segments)} 段")
+    return segments
 
 def transcribe_with_whisper(audio_path, whisper_language, prompt):
     print(f"🧠 發送給 Whisper：{audio_path}")
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("❌ 請設定 OPENAI_API_KEY 環境變數")
+        raise Exception("缺少 OpenAI 金鑰，無法呼叫 Whisper API")
+    
     with open(audio_path, 'rb') as f:
         files = {'file': f}
         data = {
@@ -61,7 +64,7 @@ def transcribe_with_whisper(audio_path, whisper_language, prompt):
             data['prompt'] = prompt
 
         headers = {
-            'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}"
+            'Authorization': f"Bearer {api_key}"
         }
 
         response = requests.post(
@@ -101,28 +104,21 @@ def process_video_task(
         video_path = os.path.join(temp_dir, "input.mp4")
         audio_path = os.path.join(temp_dir, "audio.mp3")
 
-        # Step 1: 下載影片
         download_file(video_url, video_path)
-
-        # Step 2: 擷取音訊
         extract_audio(video_path, audio_path)
+        segments = split_audio_by_ffmpeg(audio_path, max_segment_mb)
 
-        # Step 3: 分割音訊
-        segments = split_audio_by_size(audio_path, max_segment_mb)
-
-        # Step 4: Whisper 分段辨識
         full_transcript = ""
-        for segment_path in segments:
+        for idx, segment_path in enumerate(segments):
+            print(f"🔍 分段 {idx+1}/{len(segments)}")
             transcript = transcribe_with_whisper(segment_path, whisper_language, prompt)
             full_transcript += transcript + "\n"
 
-        # Step 5: 回傳 n8n webhook
-        payload = {
+        post_to_webhook(webhook_url, {
             "user_id": user_id,
             "task_id": task_id,
             "transcript": full_transcript.strip()
-        }
-        post_to_webhook(webhook_url, payload)
+        })
 
         print("✅ 任務完成")
 
