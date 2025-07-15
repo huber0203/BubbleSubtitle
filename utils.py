@@ -10,13 +10,14 @@ from openai import OpenAI
 from datetime import timedelta, datetime
 import re
 
+# ✅ utils.py 版本
+UTILS_VERSION = "v1.2.5"
+
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
 
 # ✅ 初始化 OpenAI client（新版 API）
 client = OpenAI()
-
-VERSION = "v1.0.3"
 
 def download_video(video_url, download_path):
     logging.info("⬇️ 正在下載影片...")
@@ -67,14 +68,21 @@ def upload_to_gcs(bucket_name, destination_blob_name, source_file_path):
 def transcribe_audio(file_path, language, prompt):
     logging.info(f"🧠 上傳至 Whisper 分析中...：{file_path}")
     with open(file_path, "rb") as f:
-        transcript = client.audio.transcriptions.create(
+        result = client.audio.transcriptions.create(
             model="whisper-1",
             file=f,
             language=language,
             response_format="srt",
             prompt=prompt if prompt else None
         )
-        return transcript, transcript.response.json().get("usage")
+        logging.debug(f"🔍 Whisper 回傳：{result}")
+        return result, {
+            "type": "tokens",
+            "input_tokens": 0,
+            "input_token_details": {"text_tokens": 0, "audio_tokens": 0},
+            "output_tokens": 0,
+            "total_tokens": 0
+        }
 
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
     logging.info(f"📥 開始處理影片任務 {task_id}")
@@ -84,7 +92,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
     logging.info(f"📦 Chunk 上限：{max_segment_mb} MB")
     logging.info(f"🔔 Webhook：{webhook_url}")
     logging.info(f"📝 提示詞：{prompt}")
-    logging.info(f"🧪 程式版本：{VERSION}")
+    logging.info(f"🧪 程式版本：{UTILS_VERSION}")
 
     status = "成功"
     usage_total = {
@@ -125,8 +133,8 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
                 logging.info(f"✅ 上傳 {chunk_filename} 至 GCS：{gcs_url}")
 
                 try:
-                    transcript, usage = transcribe_audio(chunk_path, whisper_language, prompt)
-                    updated_srt = shift_srt_timestamps(transcript, base_time)
+                    srt_text, usage = transcribe_audio(chunk_path, whisper_language, prompt)
+                    updated_srt = shift_srt_timestamps(srt_text, base_time)
                     output_srt += updated_srt + "\n"
                     base_time += chunk.duration_seconds
 
@@ -134,7 +142,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
                         usage_total["input_tokens"] += usage.get("input_tokens", 0)
                         usage_total["output_tokens"] += usage.get("output_tokens", 0)
                         usage_total["total_tokens"] += usage.get("total_tokens", 0)
-                        audio_tokens = usage.get("audio_tokens", 0)
+                        audio_tokens = usage.get("input_token_details", {}).get("audio_tokens", 0)
                         usage_total["input_token_details"]["audio_tokens"] += audio_tokens
                 except Exception as e:
                     status = f"失敗: Whisper 分析失敗 - {str(e)}"
@@ -164,8 +172,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "video_url": video_url,
             "whisper_language": whisper_language,
             "srt_url": srt_url,
-            "usage": usage_total,
-            "version": VERSION
+            "usage": usage_total
         })
         logging.info(f"✅ Webhook 已送出，狀態碼 {response.status_code}")
     except Exception as e:
