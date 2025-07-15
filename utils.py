@@ -11,7 +11,7 @@ import re
 import math
 
 # ✅ utils.py 版本
-UTILS_VERSION = "v1.3.1"
+UTILS_VERSION = "v1.3.2"
 
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
@@ -19,28 +19,17 @@ logging.basicConfig(level=logging.INFO)
 # ✅ 初始化 OpenAI client（新版 API）
 client = OpenAI()
 
-def download_video(video_url, download_path):
-    logging.info("⬇️ 正在下載影片...")
-    response = requests.get(video_url)
-    with open(download_path, "wb") as f:
-        f.write(response.content)
-    logging.info("✅ 影片下載完成")
-    return {
-        "size_bytes": int(response.headers.get("content-length", 0)),
-        "format": os.path.splitext(urlparse(video_url).path)[-1].lstrip(".")
-    }
-
-def convert_to_mp3_segments(input_path, output_dir, segment_seconds=300):
-    logging.info("🎧 開始轉換並分割音訊...")
+def convert_stream_to_mp3_segments(video_url, output_dir, segment_seconds=300):
+    logging.info("🎧 開始直接串流影片並分割音訊...")
     output_template = os.path.join(output_dir, "chunk_%03d.mp3")
     (
         ffmpeg
-        .input(input_path)
+        .input(video_url)
         .output(output_template, f='segment', segment_time=segment_seconds,
                 ac=1, ar=16000, ab='32k', format='mp3')
         .run(overwrite_output=True, quiet=True)
     )
-    logging.info("✅ 音訊轉換與分段完成")
+    logging.info("✅ 音訊串流轉換與分段完成")
 
 def upload_to_gcs(bucket_name, destination_blob_name, source_file_path):
     storage_client = storage.Client()
@@ -62,7 +51,16 @@ def transcribe_audio(file_path, language, prompt):
         )
         return result, None
 
-def get_video_duration(filepath):
+def get_video_info(url):
+    try:
+        head = requests.head(url, allow_redirects=True)
+        size_bytes = int(head.headers.get("content-length", 0))
+        ext = os.path.splitext(urlparse(url).path)[-1].lstrip(".")
+        return size_bytes, ext
+    except:
+        return 0, ""
+
+def get_audio_duration(filepath):
     try:
         probe = ffmpeg.probe(filepath)
         return float(probe["format"]["duration"])
@@ -91,17 +89,13 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         with tempfile.TemporaryDirectory() as tmpdir:
             logging.info(f"📁 建立暫存資料夾：{tmpdir}")
 
-            input_path = os.path.join(tmpdir, "input_video")
-            video_info = download_video(video_url, input_path)
-            original_file_size_mb = round(video_info["size_bytes"] / 1024 / 1024, 2)
-            original_file_format = video_info["format"]
-
-            video_duration = get_video_duration(input_path)
-            segment_seconds = 300  # 每段5分鐘，可根據 max_segment_mb 動態調整
-            convert_to_mp3_segments(input_path, tmpdir, segment_seconds)
+            convert_stream_to_mp3_segments(video_url, tmpdir, 300)
 
             audio_files = sorted([f for f in os.listdir(tmpdir) if f.startswith("chunk_") and f.endswith(".mp3")])
             compressed_audio_size_mb = round(sum(os.path.getsize(os.path.join(tmpdir, f)) for f in audio_files) / 1024 / 1024, 2)
+
+            original_file_size_bytes, original_file_format = get_video_info(video_url)
+            original_file_size_mb = round(original_file_size_bytes / 1024 / 1024, 2)
 
             bucket_name = "bubblebucket-a1q5lb"
             path_parts = urlparse(video_url).path.lstrip("/").split("/")
@@ -120,8 +114,9 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
                     srt_text, _ = transcribe_audio(chunk_path, whisper_language, prompt)
                     updated_srt = shift_srt_timestamps(srt_text, base_time)
                     output_srt += updated_srt + "\n"
-                    chunk_duration = get_video_duration(chunk_path)
+                    chunk_duration = get_audio_duration(chunk_path)
                     base_time += chunk_duration
+                    video_duration += chunk_duration
                 except Exception as e:
                     status = f"失敗: Whisper 分析失敗 - {str(e)}"
                     logging.error(status)
@@ -150,7 +145,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "video_url": video_url,
             "whisper_language": whisper_language,
             "srt_url": srt_url,
-            "video_duration": video_duration,
+            "video_duration": round(video_duration, 2),
             "original_file_size_mb": original_file_size_mb,
             "original_file_format": original_file_format,
             "compressed_audio_size_mb": compressed_audio_size_mb
