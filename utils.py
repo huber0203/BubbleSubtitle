@@ -112,7 +112,8 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             chunks = split_audio(audio_path, max_segment_mb)
 
             bucket_name = "bubblebucket-a1q5lb"
-            object_path = "/".join(urlparse(video_url).path.split("/")[1:-1])
+            path_parts = urlparse(video_url).path.lstrip("/").split("/")
+            object_path = "/".join(path_parts[1:-1])
 
             base_time = 0
             for i, chunk in enumerate(chunks):
@@ -132,7 +133,6 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
                     output_srt += updated_srt + "\n"
                     base_time += chunk.duration_seconds
 
-                    # 累加 usage
                     if usage:
                         usage_total["input_tokens"] += usage.get("input_tokens", 0)
                         usage_total["output_tokens"] += usage.get("output_tokens", 0)
