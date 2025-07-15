@@ -11,7 +11,7 @@ from datetime import timedelta, datetime
 import re
 
 # ✅ utils.py 版本
-UTILS_VERSION = "v1.2.7"
+UTILS_VERSION = "v1.2.8"
 
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
