@@ -98,7 +98,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         chunks = split_audio(audio_path, max_segment_mb)
 
         output_srt = ""
-        bucket_name = urlparse(video_url).netloc.split(".")[0]
+        bucket_name = urlparse(video_url).path.strip("/").split("/")[0]
         object_path = "/".join(urlparse(video_url).path.split("/")[1:-1])
 
         base_time = 0
