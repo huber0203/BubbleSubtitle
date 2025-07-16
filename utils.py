@@ -11,7 +11,7 @@ import re
 import math
 
 # ✅ utils.py 版本
-UTILS_VERSION = "v1.3.3"
+UTILS_VERSION = "v1.3.5"
 
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
@@ -92,6 +92,8 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             convert_stream_to_mp3_segments(video_url, tmpdir, 300)
 
             audio_files = sorted([f for f in os.listdir(tmpdir) if f.startswith("chunk_") and f.endswith(".mp3")])
+            total_chunks = len(audio_files)
+
             compressed_audio_size_mb = round(sum(os.path.getsize(os.path.join(tmpdir, f)) for f in audio_files) / 1024 / 1024, 2)
 
             original_file_size_bytes, original_file_format = get_video_info(video_url)
@@ -102,9 +104,10 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             object_path = "/".join(path_parts[1:-1])
 
             base_time = 0
-            for filename in audio_files:
+            for idx, filename in enumerate(audio_files):
                 chunk_path = os.path.join(tmpdir, filename)
-                logging.info(f"📤 發現並處理 {filename}（{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
+                actual_size = round(os.path.getsize(chunk_path)/1024/1024, 2)
+                logging.info(f"📦 處理進度 {idx+1}/{total_chunks}：{filename}（目標大小：{max_segment_mb} MB，實際大小：{actual_size} MB）")
 
                 gcs_path = f"{object_path}/chunks/{task_id}_{filename}"
                 gcs_url = upload_to_gcs(bucket_name, gcs_path, chunk_path)
