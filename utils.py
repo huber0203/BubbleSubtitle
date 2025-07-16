@@ -4,9 +4,9 @@ import shutil
 import logging
 import requests
 from datetime import timedelta
-from pydub import AudioSegment
 from google.cloud import storage
 from openai import OpenAI
+import subprocess
 
 # 初始化 OpenAI client
 client = OpenAI()
@@ -15,7 +15,7 @@ client = OpenAI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.3.7"
+VERSION = "v1.3.8"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -33,7 +33,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
 
     temp_dir = tempfile.mkdtemp()
     try:
-        audio_path = os.path.join(temp_dir, "audio.mp3")
+        video_path = os.path.join(temp_dir, "video.mp4")
 
         logger.info("\U0001F3A7 開始直接串流影片並分割音訊...")
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -43,55 +43,43 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         logger.info(f"\U0001F4CF 影片大小（原始）：{total_mb} MB")
 
         with requests.get(video_url, stream=True, headers=headers) as r:
-            with open(os.path.join(temp_dir, "video.mp4"), 'wb') as f:
+            with open(video_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
         logger.info("\u2705 影片下載完成")
-        logger.info("\U0001F3A7 轉換音訊中...")
-        audio = AudioSegment.from_file(os.path.join(temp_dir, "video.mp4"))
-        audio.export(audio_path, format="mp3")
 
-        compressed_size = round(os.path.getsize(audio_path) / 1024 / 1024, 2)
-        logger.info(f"\U0001F4CA 音訊壓縮後大小：{compressed_size} MB")
+        # 使用 ffmpeg 分段音訊
+        chunk_dir = os.path.join(temp_dir, "chunks")
+        os.makedirs(chunk_dir, exist_ok=True)
 
-        audio = AudioSegment.from_mp3(audio_path)
-        max_bytes = max_segment_mb * 1024 * 1024
+        bytes_per_second = 32000  # 約 32kbps mp3
+        seconds_per_chunk = (max_segment_mb * 1024 * 1024) // bytes_per_second
+        logger.info(f"⏱ 每段音訊長度估算為 {seconds_per_chunk} 秒")
 
-        chunks = []
-        start_ms = 0
-        i = 0
-        while start_ms < len(audio):
-            end_ms = len(audio)
-            for j in range(start_ms + 10000, len(audio), 1000):
-                if len(audio[start_ms:j].raw_data) > max_bytes:
-                    end_ms = j - 1000
-                    break
-            chunk = audio[start_ms:end_ms]
-            chunk_name = f"chunk_{i:03}.mp3"
-            chunk_path = os.path.join(temp_dir, chunk_name)
-            chunk.export(chunk_path, format="mp3")
-            chunks.append((chunk_path, chunk_name, start_ms))
-            logger.info(f"\U0001F4E6 處理進度 {i+1}/{len(audio)//(end_ms-start_ms)}：{chunk_name}（目標大小：{max_segment_mb} MB，實際大小：{round(os.path.getsize(chunk_path)/1024/1024,2)} MB）")
-            start_ms = end_ms
-            i += 1
+        chunk_pattern = os.path.join(chunk_dir, "chunk_%03d.mp3")
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-f", "segment",
+            "-segment_time", str(seconds_per_chunk),
+            "-c:a", "libmp3lame",
+            "-ar", "44100",
+            "-b:a", "32k",
+            chunk_pattern
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
         logger.info("\u2705 音訊串流轉換與分段完成")
 
-        final_srt = []
-        full_usage = {
-            "type": "tokens",
-            "input_tokens": 0,
-            "input_token_details": {"text_tokens": 0, "audio_tokens": 0},
-            "output_tokens": 0,
-            "total_tokens": 0,
-        }
+        chunks = sorted([f for f in os.listdir(chunk_dir) if f.endswith(".mp3")])
 
-        for idx, (chunk_path, chunk_name, offset_ms) in enumerate(chunks):
-            logger.info(f"\U0001F4E4 發現並處理 {chunk_name}（{round(os.path.getsize(chunk_path)/1024/1024,2)} MB）")
+        final_srt = []
+        offset_ms = 0
+        for i, chunk_name in enumerate(chunks):
+            chunk_path = os.path.join(chunk_dir, chunk_name)
+            logger.info(f"\U0001F4E4 處理進度 {i+1}/{len(chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
             upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
             logger.info(f"\u2705 上傳 {chunk_name} 至 GCS：{upload_url}")
 
-            logger.info(f"\U0001F9E0 上傳至 Whisper 分析中...：{chunk_path}")
             with open(chunk_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",
@@ -105,6 +93,8 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
                 start = str(timedelta(seconds=segment["start"] + offset_ms / 1000))[:-3].replace('.', ',')
                 end = str(timedelta(seconds=segment["end"] + offset_ms / 1000))[:-3].replace('.', ',')
                 final_srt.append(f"{len(final_srt)+1}\n{start} --> {end}\n{segment['text'].strip()}\n")
+
+            offset_ms += int(transcript.segments[-1]["end"] * 1000)
 
         srt_path = os.path.join(temp_dir, "first.srt")
         with open(srt_path, "w", encoding="utf-8") as f:
@@ -121,7 +111,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "whisper_language": whisper_language,
             "srt_url": srt_url,
             "影片原始大小MB": total_mb,
-            "音訊壓縮大小MB": compressed_size,
+            "音訊壓縮大小MB": "N/A（ffmpeg handled）",
             "原始格式": video_url.split(".")[-1],
             "程式版本": VERSION,
         }
