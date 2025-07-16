@@ -68,15 +68,17 @@ def process_video_task_streaming(video_url, user_id, task_id, whisper_language, 
             # 4.1 下載影片段
             video_chunk_path = os.path.join(temp_dir, f"video_chunk_{chunk_idx:03d}.mp4")
             if not download_video_chunk(video_url, start_byte, end_byte, video_chunk_path):
-                logger.error(f"❌ 影片段 {chunk_idx} 下載失敗")
-                continue
+                error_msg = f"影片段 {chunk_idx} 下載失敗"
+                logger.error(f"❌ {error_msg}")
+                raise RuntimeError(error_msg)
                 
             # 4.2 轉換為音檔
             audio_chunk_path = os.path.join(temp_dir, f"audio_chunk_{chunk_idx:03d}.mp3")
             chunk_duration = convert_to_audio(video_chunk_path, audio_chunk_path)
             if chunk_duration is None:
-                logger.error(f"❌ 音檔轉換失敗：chunk {chunk_idx}")
-                continue
+                error_msg = f"音檔轉換失敗：chunk {chunk_idx} - 可能是影片格式問題或分段破壞了檔案結構"
+                logger.error(f"❌ {error_msg}")
+                raise RuntimeError(error_msg)
                 
             # 4.3 讀取音檔內容
             with open(audio_chunk_path, 'rb') as f:
@@ -200,7 +202,7 @@ def download_video_chunk(video_url, start_byte, end_byte, output_path, max_retri
 def convert_to_audio(video_path, audio_path):
     """轉換影片為音檔，返回時長"""
     try:
-        # 使用容錯性更高的設定
+        # 方法1：嘗試直接轉換（適用於完整的影片段）
         cmd = [
             "ffmpeg", "-y", 
             "-fflags", "+discardcorrupt+igndts",
@@ -212,21 +214,89 @@ def convert_to_audio(video_path, audio_path):
         ]
         
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error(f"FFmpeg 轉檔失敗：{result.stderr}")
-            return None
+        if result.returncode == 0:
+            # 成功，取得時長
+            duration = get_audio_duration(audio_path)
+            if duration > 0:
+                return duration
         
-        # 取得音檔時長
-        cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", 
-               "-of", "csv=p=0", audio_path]
+        logger.warning(f"⚠️ 直接轉換失敗，嘗試修復檔案結構...")
+        
+        # 方法2：先用 ffmpeg 修復檔案結構
+        temp_fixed_path = video_path.replace('.mp4', '_fixed.mp4')
+        cmd = [
+            "ffmpeg", "-y",
+            "-fflags", "+discardcorrupt+igndts",
+            "-i", video_path,
+            "-c", "copy",
+            "-movflags", "faststart",
+            "-f", "mp4",
+            temp_fixed_path
+        ]
+        
         result = subprocess.run(cmd, capture_output=True, text=True)
-        duration = float(result.stdout.strip()) if result.stdout.strip() else 0.0
+        if result.returncode == 0:
+            # 修復成功，再轉音檔
+            cmd = [
+                "ffmpeg", "-y", 
+                "-i", temp_fixed_path,
+                "-vn", "-acodec", "libmp3lame",
+                "-ar", "44100", "-b:a", "32k",
+                "-f", "mp3",
+                audio_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                duration = get_audio_duration(audio_path)
+                if duration > 0:
+                    os.remove(temp_fixed_path)
+                    return duration
+            
+            os.remove(temp_fixed_path)
         
-        return duration
+        logger.warning(f"⚠️ 修復失敗，嘗試原始音檔提取...")
+        
+        # 方法3：嘗試直接提取音檔流（忽略容器格式）
+        cmd = [
+            "ffmpeg", "-y",
+            "-fflags", "+discardcorrupt+igndts+ignidx",
+            "-analyzeduration", "10000000",
+            "-probesize", "10000000", 
+            "-i", video_path,
+            "-vn", "-acodec", "libmp3lame",
+            "-ar", "44100", "-b:a", "32k",
+            "-avoid_negative_ts", "make_zero",
+            "-f", "mp3",
+            audio_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            duration = get_audio_duration(audio_path)
+            if duration > 0:
+                return duration
+        
+        # 所有方法都失敗
+        logger.error(f"FFmpeg 所有轉檔方法都失敗")
+        logger.error(f"最後錯誤：{result.stderr}")
+        return None
         
     except Exception as e:
         logger.error(f"音檔轉換錯誤：{e}")
         return None
+
+def get_audio_duration(audio_path):
+    """取得音檔時長"""
+    try:
+        cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", 
+               "-of", "csv=p=0", audio_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except:
+        pass
+    return 0.0
 
 def process_audio_batch(accumulated_audio, batch_count, time_offset, whisper_language, prompt, temp_dir, user_id, task_id):
     """處理累積的音檔批次"""
