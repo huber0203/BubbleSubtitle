@@ -5,320 +5,212 @@ import logging
 import requests
 from datetime import timedelta
 from google.cloud import storage
+from google.cloud.video import transcoder_v1
 from openai import OpenAI
 import subprocess
 import io
+import time
 
 # 初始化 OpenAI client
 client = OpenAI()
+
+# 初始化 Google Cloud clients
+storage_client = storage.Client()
+transcoder_client = transcoder_v1.TranscoderServiceClient()
 
 # 初始化 logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.2"
+VERSION = "v1.6.3"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
+TRANSCODER_FOLDER = "transcoder"
 
 # 配置參數
-VIDEO_CHUNK_SIZE_MB = 50  # 影片分段大小
-VIDEO_CHUNK_SIZE_BYTES = VIDEO_CHUNK_SIZE_MB * 1024 * 1024
 AUDIO_BATCH_SIZE_MB = 24  # 音檔累積到這個大小就送 Whisper
 AUDIO_BATCH_SIZE_BYTES = AUDIO_BATCH_SIZE_MB * 1024 * 1024
 
-def download_mp4_metadata(video_url, total_size, metadata_path, metadata_size_mb=5):
-    """下載 MP4 檔案的 metadata (從結尾開始，失敗則嘗試開頭)"""
+# Google Cloud 配置
+PROJECT_ID = "bubble-dropzone-2-pgxrk7"  # 正確的 project ID
+LOCATION = "us-central1"  # 美國中部，與 US multi-region bucket 配合
+
+def create_transcoder_job(input_uri, output_uri, job_id):
+    """建立 Transcoder 任務來轉換影片為 MP3"""
     try:
-        # 方法1：下載檔案末尾的 metadata（通常在最後幾 MB）
-        metadata_bytes = metadata_size_mb * 1024 * 1024
-        start_byte = max(0, total_size - metadata_bytes)
-        end_byte = total_size - 1
+        logger.info(f"🎬 建立 Transcoder 任務：{job_id}")
         
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Range": f"bytes={start_byte}-{end_byte}"
-        }
+        # 配置音檔輸出
+        audio_stream = transcoder_v1.AudioStream(
+            codec="mp3",
+            bitrate_bps=128000,  # 128kbps
+            sample_rate_hertz=44100,
+            channel_count=2
+        )
         
-        logger.info(f"📥 嘗試下載檔案末尾 metadata：{headers['Range']}")
+        # 配置 MuxStream (只要音檔)
+        mux_stream = transcoder_v1.MuxStream(
+            key="audio_only",
+            container="mp3",
+            elementary_streams=["audio_stream"]
+        )
         
-        with requests.get(video_url, headers=headers, stream=True) as r:
-            r.raise_for_status()
-            with open(metadata_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+        # 配置 Job
+        job = transcoder_v1.Job(
+            input_uri=input_uri,
+            output_uri=output_uri,
+            config=transcoder_v1.JobConfig(
+                elementary_streams=[
+                    transcoder_v1.ElementaryStream(
+                        key="audio_stream",
+                        audio_stream=audio_stream
+                    )
+                ],
+                mux_streams=[mux_stream],
+                output=transcoder_v1.Output(
+                    uri=output_uri
+                )
+            )
+        )
         
-        size_mb = round(os.path.getsize(metadata_path) / 1024 / 1024, 2)
-        logger.info(f"✅ 末尾 metadata 下載完成：{size_mb} MB")
+        # 建立任務
+        parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
+        request = transcoder_v1.CreateJobRequest(
+            parent=parent,
+            job=job,
+            job_id=job_id
+        )
         
-        # 驗證是否包含 moov atom
-        with open(metadata_path, 'rb') as f:
-            content = f.read()
-            if b'moov' in content:
-                logger.info("✅ 在檔案末尾找到 moov atom")
-                return True
+        operation = transcoder_client.create_job(request=request)
+        logger.info(f"✅ Transcoder 任務建立成功：{operation.name}")
         
-        logger.warning("⚠️ 檔案末尾未找到 moov atom，嘗試檔案開頭")
-        
-        # 方法2：下載檔案開頭的 metadata
-        start_byte = 0
-        end_byte = min(metadata_bytes - 1, total_size - 1)
-        
-        headers["Range"] = f"bytes={start_byte}-{end_byte}"
-        logger.info(f"📥 嘗試下載檔案開頭 metadata：{headers['Range']}")
-        
-        with requests.get(video_url, headers=headers, stream=True) as r:
-            r.raise_for_status()
-            with open(metadata_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        
-        size_mb = round(os.path.getsize(metadata_path) / 1024 / 1024, 2)
-        logger.info(f"✅ 開頭 metadata 下載完成：{size_mb} MB")
-        
-        # 驗證是否包含 moov atom
-        with open(metadata_path, 'rb') as f:
-            content = f.read()
-            if b'moov' in content:
-                logger.info("✅ 在檔案開頭找到 moov atom")
-                return True
-        
-        logger.warning("⚠️ 檔案開頭也未找到 moov atom，嘗試開頭+結尾組合")
-        
-        # 方法3：同時下載開頭和結尾
-        return download_combined_metadata(video_url, total_size, metadata_path, metadata_size_mb)
+        return operation
         
     except Exception as e:
-        logger.error(f"Metadata 下載失敗：{e}")
-        return False
-
-def download_combined_metadata(video_url, total_size, metadata_path, metadata_size_mb):
-    """下載開頭+結尾的組合 metadata"""
-    try:
-        metadata_bytes = metadata_size_mb * 1024 * 1024
-        headers = {"User-Agent": "Mozilla/5.0"}
-        
-        logger.info(f"📥 下載開頭+結尾組合 metadata")
-        
-        with open(metadata_path, "wb") as output:
-            # 下載開頭部分
-            headers["Range"] = f"bytes=0-{metadata_bytes - 1}"
-            logger.info(f"📥 下載開頭：{headers['Range']}")
-            
-            with requests.get(video_url, headers=headers, stream=True) as r:
-                r.raise_for_status()
-                for chunk in r.iter_content(chunk_size=8192):
-                    output.write(chunk)
-            
-            # 下載結尾部分
-            start_byte = max(metadata_bytes, total_size - metadata_bytes)
-            end_byte = total_size - 1
-            
-            if start_byte < end_byte:  # 確保不重複下載
-                headers["Range"] = f"bytes={start_byte}-{end_byte}"
-                logger.info(f"📥 下載結尾：{headers['Range']}")
-                
-                with requests.get(video_url, headers=headers, stream=True) as r:
-                    r.raise_for_status()
-                    for chunk in r.iter_content(chunk_size=8192):
-                        output.write(chunk)
-        
-        size_mb = round(os.path.getsize(metadata_path) / 1024 / 1024, 2)
-        logger.info(f"✅ 組合 metadata 下載完成：{size_mb} MB")
-        
-        # 驗證是否包含 moov atom
-        with open(metadata_path, 'rb') as f:
-            content = f.read()
-            if b'moov' in content:
-                logger.info("✅ 在組合 metadata 中找到 moov atom")
-                return True
-        
-        logger.error("❌ 所有方法都無法找到 moov atom")
-        return False
-        
-    except Exception as e:
-        logger.error(f"組合 metadata 下載失敗：{e}")
-        return False
-
-def download_video_chunk(video_url, start_byte, end_byte, output_path, max_retries=3):
-    """下載單個影片段"""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
-    for attempt in range(max_retries):
-        try:
-            headers["Range"] = f"bytes={start_byte}-{end_byte}"
-            logger.info(f"📥 下載範圍：{headers['Range']}")
-            
-            with requests.get(video_url, headers=headers, stream=True) as r:
-                r.raise_for_status()
-                with open(output_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-            
-            size_mb = round(os.path.getsize(output_path) / 1024 / 1024, 2)
-            logger.info(f"✅ 影片段下載完成：{size_mb} MB")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"⚠️ 下載失敗，嘗試 {attempt + 1}/{max_retries}: {e}")
-    
-    return False
-
-def combine_chunk_with_metadata(chunk_path, metadata_path, output_path):
-    """將影片段與 metadata 組合成完整的 MP4"""
-    try:
-        # 方法1：簡單合併 - 將 chunk 和 metadata 合併
-        with open(output_path, 'wb') as output:
-            # 先寫入 chunk 內容
-            with open(chunk_path, 'rb') as chunk_file:
-                output.write(chunk_file.read())
-            
-            # 再寫入 metadata
-            with open(metadata_path, 'rb') as meta_file:
-                output.write(meta_file.read())
-        
-        # 驗證合併後的檔案
-        if verify_mp4_structure(output_path):
-            logger.info("✅ 簡單合併成功")
-            return True
-        
-        logger.warning("⚠️ 簡單合併失敗，嘗試 FFmpeg 修復")
-        
-        # 方法2：使用 FFmpeg 修復
-        temp_path = output_path.replace('.mp4', '_temp.mp4')
-        os.rename(output_path, temp_path)
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-fflags", "+discardcorrupt+igndts",
-            "-i", temp_path,
-            "-c", "copy",
-            "-movflags", "faststart",
-            "-f", "mp4",
-            output_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        os.remove(temp_path)
-        
-        if result.returncode == 0 and verify_mp4_structure(output_path):
-            logger.info("✅ FFmpeg 修復成功")
-            return True
-        
-        logger.error("❌ 所有組合方法都失敗")
-        return False
-        
-    except Exception as e:
-        logger.error(f"組合失敗：{e}")
-        return False
-
-def verify_mp4_structure(file_path):
-    """驗證 MP4 檔案結構是否正確"""
-    try:
-        cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", file_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.returncode == 0 and result.stdout.strip()
-    except:
-        return False
-
-def convert_to_audio(video_path, audio_path):
-    """轉換影片為音檔，返回時長"""
-    try:
-        # 方法1：嘗試直接轉換（適用於完整的影片段）
-        cmd = [
-            "ffmpeg", "-y", 
-            "-fflags", "+discardcorrupt+igndts",
-            "-i", video_path,
-            "-vn", "-acodec", "libmp3lame",
-            "-ar", "44100", "-b:a", "32k",
-            "-f", "mp3",
-            audio_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            # 成功，取得時長
-            duration = get_audio_duration(audio_path)
-            if duration > 0:
-                return duration
-        
-        logger.warning(f"⚠️ 直接轉換失敗，嘗試修復檔案結構...")
-        
-        # 方法2：先用 ffmpeg 修復檔案結構
-        temp_fixed_path = video_path.replace('.mp4', '_fixed.mp4')
-        cmd = [
-            "ffmpeg", "-y",
-            "-fflags", "+discardcorrupt+igndts",
-            "-i", video_path,
-            "-c", "copy",
-            "-movflags", "faststart",
-            "-f", "mp4",
-            temp_fixed_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            # 修復成功，再轉音檔
-            cmd = [
-                "ffmpeg", "-y", 
-                "-i", temp_fixed_path,
-                "-vn", "-acodec", "libmp3lame",
-                "-ar", "44100", "-b:a", "32k",
-                "-f", "mp3",
-                audio_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                duration = get_audio_duration(audio_path)
-                if duration > 0:
-                    os.remove(temp_fixed_path)
-                    return duration
-            
-            os.remove(temp_fixed_path)
-        
-        logger.warning(f"⚠️ 修復失敗，嘗試原始音檔提取...")
-        
-        # 方法3：嘗試直接提取音檔流（忽略容器格式）
-        cmd = [
-            "ffmpeg", "-y",
-            "-fflags", "+discardcorrupt+igndts+ignidx",
-            "-analyzeduration", "10000000",
-            "-probesize", "10000000", 
-            "-i", video_path,
-            "-vn", "-acodec", "libmp3lame",
-            "-ar", "44100", "-b:a", "32k",
-            "-avoid_negative_ts", "make_zero",
-            "-f", "mp3",
-            audio_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            duration = get_audio_duration(audio_path)
-            if duration > 0:
-                return duration
-        
-        # 所有方法都失敗
-        logger.error(f"FFmpeg 所有轉檔方法都失敗")
-        logger.error(f"最後錯誤：{result.stderr}")
-        return None
-        
-    except Exception as e:
-        logger.error(f"音檔轉換錯誤：{e}")
+        logger.error(f"❌ 建立 Transcoder 任務失敗：{e}")
         return None
 
-def get_audio_duration(audio_path):
-    """取得音檔時長"""
+def wait_for_transcoder_job(job_name, timeout_minutes=30):
+    """等待 Transcoder 任務完成"""
     try:
+        logger.info(f"⏳ 等待 Transcoder 任務完成：{job_name}")
+        
+        timeout_seconds = timeout_minutes * 60
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout_seconds:
+            job = transcoder_client.get_job(name=job_name)
+            
+            logger.info(f"📊 任務狀態：{job.state}")
+            
+            if job.state == transcoder_v1.Job.State.SUCCEEDED:
+                logger.info("✅ Transcoder 任務完成")
+                return True
+            elif job.state == transcoder_v1.Job.State.FAILED:
+                logger.error(f"❌ Transcoder 任務失敗：{job.failure_reason}")
+                return False
+            
+            time.sleep(30)  # 每 30 秒檢查一次
+        
+        logger.error(f"⏰ Transcoder 任務超時 ({timeout_minutes} 分鐘)")
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ 等待 Transcoder 任務失敗：{e}")
+        return False
+
+def download_audio_from_gcs(gcs_uri, local_path):
+    """從 GCS 下載音檔"""
+    try:
+        # 解析 GCS URI
+        if not gcs_uri.startswith("gs://"):
+            raise ValueError(f"Invalid GCS URI: {gcs_uri}")
+        
+        uri_parts = gcs_uri[5:].split("/", 1)
+        bucket_name = uri_parts[0]
+        blob_name = uri_parts[1]
+        
+        logger.info(f"📥 從 GCS 下載音檔：{gcs_uri}")
+        
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        
+        blob.download_to_filename(local_path)
+        
+        size_mb = round(os.path.getsize(local_path) / 1024 / 1024, 2)
+        logger.info(f"✅ 音檔下載完成：{size_mb} MB")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ 下載音檔失敗：{e}")
+        return False
+
+def split_audio_file(audio_path, chunk_size_mb=24):
+    """分割音檔為多個小檔案"""
+    try:
+        logger.info(f"🔪 分割音檔：{audio_path}")
+        
+        # 取得音檔時長
         cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", 
                "-of", "csv=p=0", audio_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-    except:
-        pass
-    return 0.0
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"無法取得音檔時長：{result.stderr}")
+        
+        total_duration = float(result.stdout.strip())
+        file_size_mb = os.path.getsize(audio_path) / 1024 / 1024
+        
+        logger.info(f"📊 音檔總時長：{total_duration:.2f}s，大小：{file_size_mb:.2f}MB")
+        
+        # 如果檔案小於限制，直接返回
+        if file_size_mb <= chunk_size_mb:
+            logger.info("📦 音檔大小符合限制，不需分割")
+            return [audio_path]
+        
+        # 計算分割點
+        chunk_duration = (total_duration * chunk_size_mb) / file_size_mb
+        num_chunks = int(total_duration / chunk_duration) + 1
+        
+        logger.info(f"🔪 將分割為 {num_chunks} 段，每段約 {chunk_duration:.2f}s")
+        
+        chunks = []
+        base_path = os.path.splitext(audio_path)[0]
+        
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            end_time = min((i + 1) * chunk_duration, total_duration)
+            
+            if start_time >= total_duration:
+                break
+                
+            chunk_path = f"{base_path}_chunk_{i:03d}.mp3"
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", audio_path,
+                "-ss", str(start_time),
+                "-t", str(end_time - start_time),
+                "-c", "copy",
+                chunk_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"❌ 分割失敗：{result.stderr}")
+                continue
+                
+            chunks.append(chunk_path)
+            chunk_size = round(os.path.getsize(chunk_path) / 1024 / 1024, 2)
+            logger.info(f"✅ 分割完成：{os.path.basename(chunk_path)} ({chunk_size} MB)")
+        
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"❌ 分割音檔失敗：{e}")
+        return []
 
 def process_audio_batch(accumulated_audio, batch_count, time_offset, whisper_language, prompt, temp_dir, user_id, task_id):
     """處理累積的音檔批次"""
@@ -368,8 +260,7 @@ def process_audio_batch(accumulated_audio, batch_count, time_offset, whisper_lan
 def upload_to_gcs(file_path, blob_path):
     """上傳檔案到 GCS"""
     try:
-        client = storage.Client()
-        bucket = client.bucket(BUCKET_NAME)
+        bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(blob_path)
         
         content_type = "application/x-subrip" if file_path.endswith(".srt") else "audio/mpeg"
@@ -380,12 +271,11 @@ def upload_to_gcs(file_path, blob_path):
         logger.error(f"GCS 上傳失敗：{e}")
         raise
 
-def process_video_task_streaming(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
-    logger.info(f"📥 開始串流處理影片任務 {task_id}")
+def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
+    logger.info(f"📥 開始使用 Transcoder 處理影片任務 {task_id}")
     logger.info(f"🌐 影片來源：{video_url}")
     logger.info(f"👤 使用者：{user_id}")
     logger.info(f"🌍 語言：{whisper_language}")
-    logger.info(f"📦 影片分段大小：{VIDEO_CHUNK_SIZE_MB} MB")
     logger.info(f"🎵 音檔批次大小：{AUDIO_BATCH_SIZE_MB} MB")
     logger.info(f"🔔 Webhook：{webhook_url}")
     logger.info(f"📝 提示詞：{prompt}")
@@ -393,106 +283,82 @@ def process_video_task_streaming(video_url, user_id, task_id, whisper_language, 
 
     temp_dir = tempfile.mkdtemp()
     try:
-        # 1. 取得影片總大小
+        # 1. 確認影片可以訪問
+        logger.info("🔍 檢查影片 URL...")
         headers = {"User-Agent": "Mozilla/5.0"}
         head_resp = requests.head(video_url, allow_redirects=True, headers=headers)
         total_size = int(head_resp.headers.get("Content-Length", 0))
         total_mb = round(total_size / 1024 / 1024, 2)
         logger.info(f"📏 影片大小：{total_mb} MB")
 
-        # 2. 先下載 MP4 metadata (moov atom)
-        metadata_path = os.path.join(temp_dir, "metadata.mp4")
-        if not download_mp4_metadata(video_url, total_size, metadata_path):
-            raise RuntimeError("無法下載 MP4 metadata")
+        # 2. 建立 Transcoder 任務
+        job_id = f"audio-extract-{user_id}-{task_id}"
+        output_gcs_uri = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/audio.mp3"
         
-        # 3. 計算影片分段數量
-        num_video_chunks = (total_size + VIDEO_CHUNK_SIZE_BYTES - 1) // VIDEO_CHUNK_SIZE_BYTES
-        logger.info(f"📦 預計分割為 {num_video_chunks} 個影片段")
+        transcoder_job = create_transcoder_job(video_url, output_gcs_uri, job_id)
+        if not transcoder_job:
+            raise RuntimeError("建立 Transcoder 任務失敗")
 
-        # 4. 音檔累積變數
-        accumulated_audio = io.BytesIO()
-        accumulated_size = 0
-        audio_batch_count = 0
-        total_duration_offset = 0.0  # 累計時間偏移
+        # 3. 等待 Transcoder 完成
+        job_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/jobs/{job_id}"
+        if not wait_for_transcoder_job(job_name):
+            raise RuntimeError("Transcoder 任務失敗或超時")
+
+        # 4. 下載轉換後的音檔
+        audio_path = os.path.join(temp_dir, "full_audio.mp3")
+        if not download_audio_from_gcs(output_gcs_uri, audio_path):
+            raise RuntimeError("下載音檔失敗")
+
+        # 5. 分割音檔（如果需要）
+        audio_chunks = split_audio_file(audio_path, AUDIO_BATCH_SIZE_MB)
+        if not audio_chunks:
+            raise RuntimeError("分割音檔失敗")
+
+        # 6. 處理音檔批次
         final_srt_parts = []
-
-        # 5. 逐段處理影片
-        for chunk_idx in range(num_video_chunks):
-            start_byte = chunk_idx * VIDEO_CHUNK_SIZE_BYTES
-            end_byte = min(start_byte + VIDEO_CHUNK_SIZE_BYTES - 1, total_size - 1)
+        total_duration_offset = 0.0
+        
+        for batch_idx, chunk_path in enumerate(audio_chunks):
+            batch_count = batch_idx + 1
+            logger.info(f"🚀 處理音檔批次 {batch_count}/{len(audio_chunks)}")
             
-            logger.info(f"📦 處理影片段 {chunk_idx + 1}/{num_video_chunks}")
+            # 6.1 上傳音檔到 GCS
+            chunk_name = f"audio_batch_{batch_count:03d}.mp3"
+            upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
+            logger.info(f"✅ 音檔批次上傳：{upload_url}")
             
-            # 5.1 下載影片段
-            video_chunk_path = os.path.join(temp_dir, f"video_chunk_{chunk_idx:03d}.mp4")
-            if not download_video_chunk(video_url, start_byte, end_byte, video_chunk_path):
-                error_msg = f"影片段 {chunk_idx} 下載失敗"
-                logger.error(f"❌ {error_msg}")
-                raise RuntimeError(error_msg)
-                
-            # 5.2 組合 chunk + metadata 創建完整 MP4
-            complete_video_path = os.path.join(temp_dir, f"complete_video_{chunk_idx:03d}.mp4")
-            if not combine_chunk_with_metadata(video_chunk_path, metadata_path, complete_video_path):
-                error_msg = f"影片段 {chunk_idx} metadata 組合失敗"
-                logger.error(f"❌ {error_msg}")
-                raise RuntimeError(error_msg)
-                
-            # 5.3 轉換為音檔
-            audio_chunk_path = os.path.join(temp_dir, f"audio_chunk_{chunk_idx:03d}.mp3")
-            chunk_duration = convert_to_audio(complete_video_path, audio_chunk_path)
-            if chunk_duration is None:
-                error_msg = f"音檔轉換失敗：chunk {chunk_idx} - 可能是影片格式問題或分段破壞了檔案結構"
-                logger.error(f"❌ {error_msg}")
-                raise RuntimeError(error_msg)
-
-            # 5.4 讀取音檔內容
-            with open(audio_chunk_path, 'rb') as f:
-                audio_data = f.read()
-            
-            audio_size = len(audio_data)
-            logger.info(f"🎵 音檔段 {chunk_idx}: {round(audio_size/1024/1024, 2)} MB, 時長: {chunk_duration:.2f}s")
-            
-            # 5.5 累積音檔
-            accumulated_audio.write(audio_data)
-            accumulated_size += audio_size
-            
-            # 5.6 檢查是否需要送 Whisper
-            is_last_chunk = (chunk_idx == num_video_chunks - 1)
-            should_process = (accumulated_size >= AUDIO_BATCH_SIZE_BYTES) or is_last_chunk
-            
-            if should_process and accumulated_size > 0:
-                audio_batch_count += 1
-                batch_size_mb = round(accumulated_size / 1024 / 1024, 2)
-                logger.info(f"🚀 準備送 Whisper 批次 {audio_batch_count}，大小：{batch_size_mb} MB")
-                
-                # 5.7 處理音檔批次
-                srt_part, batch_duration = process_audio_batch(
-                    accumulated_audio, 
-                    audio_batch_count, 
-                    total_duration_offset,
-                    whisper_language,
-                    prompt,
-                    temp_dir,
-                    user_id,
-                    task_id
+            # 6.2 送 Whisper 轉錄
+            with open(chunk_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    response_format="verbose_json",
+                    language=whisper_language,
+                    prompt=prompt or None,
                 )
-                
-                if srt_part:
-                    final_srt_parts.extend(srt_part)
-                    total_duration_offset += batch_duration
-                    logger.info(f"✅ 批次 {audio_batch_count} 完成，累計時長：{total_duration_offset:.2f}s")
-                
-                # 5.8 重置累積器
-                accumulated_audio.close()
-                accumulated_audio = io.BytesIO()
-                accumulated_size = 0
             
-            # 5.9 清除暫存檔案
-            os.remove(video_chunk_path)
-            os.remove(complete_video_path)
-            os.remove(audio_chunk_path)
+            # 6.3 處理轉錄結果
+            srt_entries = []
+            batch_duration = 0.0
+            
+            for segment in transcript.segments:
+                start_time = segment.start + total_duration_offset
+                end_time = segment.end + total_duration_offset
+                
+                start_str = str(timedelta(seconds=start_time))[:-3].replace('.', ',')
+                end_str = str(timedelta(seconds=end_time))[:-3].replace('.', ',')
+                
+                srt_entry = f"{start_str} --> {end_str}\n{segment.text.strip()}"
+                srt_entries.append(srt_entry)
+                
+                batch_duration = max(batch_duration, segment.end)
+            
+            final_srt_parts.extend(srt_entries)
+            total_duration_offset += batch_duration
+            
+            logger.info(f"📝 批次 {batch_count} 轉錄完成，{len(srt_entries)} 個片段")
 
-        # 6. 生成最終 SRT
+        # 7. 生成最終 SRT
         if final_srt_parts:
             srt_path = os.path.join(temp_dir, "final.srt")
             with open(srt_path, "w", encoding="utf-8") as f:
@@ -502,7 +368,7 @@ def process_video_task_streaming(video_url, user_id, task_id, whisper_language, 
             srt_url = upload_to_gcs(srt_path, f"{user_id}/{task_id}/{SRT_FOLDER}/final.srt")
             logger.info(f"📄 SRT 已上傳：{srt_url}")
 
-            # 7. 發送成功回應
+            # 8. 發送成功回應
             payload = {
                 "任務狀態": "成功",
                 "user_id": user_id,
@@ -511,9 +377,9 @@ def process_video_task_streaming(video_url, user_id, task_id, whisper_language, 
                 "whisper_language": whisper_language,
                 "srt_url": srt_url,
                 "影片原始大小MB": total_mb,
-                "影片分段數": num_video_chunks,
-                "音檔批次數": audio_batch_count,
+                "音檔批次數": len(audio_chunks),
                 "總時長秒": total_duration_offset,
+                "轉換方式": "Google Transcoder API",
                 "程式版本": VERSION,
             }
 
@@ -543,5 +409,5 @@ def process_video_task_streaming(video_url, user_id, task_id, whisper_language, 
 
 # 主要入口點
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
-    """主要處理函數"""
-    return process_video_task_streaming(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt)
+    """主要處理函數 - 使用 Google Transcoder API"""
+    return process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt)
