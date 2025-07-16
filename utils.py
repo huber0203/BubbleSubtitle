@@ -15,7 +15,7 @@ client = OpenAI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.3.8"
+VERSION = "v1.3.9"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -46,7 +46,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             with open(video_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
-        logger.info("\u2705 影片下載完成")
+        logger.info("✅ 影片下載完成")
 
         # 使用 ffmpeg 分段音訊
         chunk_dir = os.path.join(temp_dir, "chunks")
@@ -66,11 +66,25 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "-b:a", "32k",
             chunk_pattern
         ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
-        logger.info("\u2705 音訊串流轉換與分段完成")
+        logger.info("🔧 執行 ffmpeg 音訊切割命令...")
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        logger.info("🔍 ffmpeg stderr：\n" + result.stderr)
+        logger.info("🔍 ffmpeg stdout：\n" + result.stdout)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg 分割失敗，錯誤碼 {result.returncode}")
+
+        logger.info("✅ 音訊串流轉換與分段完成")
 
         chunks = sorted([f for f in os.listdir(chunk_dir) if f.endswith(".mp3")])
+        logger.info(f"🔍 共產出 {len(chunks)} 段音訊 chunk 檔案")
 
         final_srt = []
         offset_ms = 0
@@ -78,7 +92,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             chunk_path = os.path.join(chunk_dir, chunk_name)
             logger.info(f"\U0001F4E4 處理進度 {i+1}/{len(chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
             upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
-            logger.info(f"\u2705 上傳 {chunk_name} 至 GCS：{upload_url}")
+            logger.info(f"✅ 上傳 {chunk_name} 至 GCS：{upload_url}")
 
             with open(chunk_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(
@@ -118,7 +132,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
 
         logger.info("\U0001F4EC 發送 Webhook 回傳...")
         requests.post(webhook_url, json=payload, timeout=10)
-        logger.info("\u2705 Webhook 已送出")
+        logger.info("✅ Webhook 已送出")
 
     except Exception as e:
         logger.error(f"\U0001F525 任務處理錯誤 - {e}")
@@ -134,7 +148,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         try:
             logger.info("\U0001F4EC 發送 Webhook 回傳...")
             requests.post(webhook_url, json=payload, timeout=10)
-            logger.info("\u2705 Webhook 已送出")
+            logger.info("✅ Webhook 已送出")
         except:
             pass
     finally:
