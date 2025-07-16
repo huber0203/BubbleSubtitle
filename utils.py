@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.10"
+VERSION = "v1.6.11" # 版本號微調以示區別
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -65,56 +65,6 @@ def convert_http_url_to_gcs_uri(http_url):
             raise ValueError(f"URL 不是有效的 GCS HTTP URL: {http_url}")
     except Exception as e:
         logger.error(f"❌ URL 轉換失敗：{e}")
-        return None
-    """建立 Transcoder 任務來轉換影片為 MP3"""
-    try:
-        logger.info(f"🎬 建立 Transcoder 任務：{job_id}")
-        
-        # 配置音檔輸出
-        audio_stream = transcoder_v1.AudioStream(
-            codec="mp3",
-            bitrate_bps=128000,  # 128kbps
-            sample_rate_hertz=44100,
-            channel_count=2
-        )
-        
-        # 配置 MuxStream (只要音檔)
-        mux_stream = transcoder_v1.MuxStream(
-            key="audio_only",
-            container="mp3",
-            elementary_streams=["audio_stream"]
-        )
-        
-        # 配置 Job
-        job = transcoder_v1.Job(
-            input_uri=input_uri,
-            output_uri=output_uri,
-            config=transcoder_v1.JobConfig(
-                elementary_streams=[
-                    transcoder_v1.ElementaryStream(
-                        key="audio_stream",
-                        audio_stream=audio_stream
-                    )
-                ],
-                mux_streams=[mux_stream]
-            )
-        )
-        
-        # 建立任務請求
-        parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
-        request = transcoder_v1.CreateJobRequest(
-            parent=parent,
-            job=job
-        )
-        
-        # 建立任務
-        created_job = transcoder_client.create_job(request=request)
-        logger.info(f"✅ Transcoder 任務建立成功：{created_job.name}")
-        
-        return created_job
-        
-    except Exception as e:
-        logger.error(f"❌ 建立 Transcoder 任務失敗：{e}")
         return None
 
 def create_transcoder_job(input_uri, output_folder_uri, job_id):
@@ -303,51 +253,6 @@ def split_audio_file(audio_path, chunk_size_mb=24):
         logger.error(f"❌ 分割音檔失敗：{e}")
         return []
 
-def process_audio_batch(accumulated_audio, batch_count, time_offset, whisper_language, prompt, temp_dir, user_id, task_id):
-    """處理累積的音檔批次"""
-    try:
-        # 保存累積的音檔
-        batch_audio_path = os.path.join(temp_dir, f"audio_batch_{batch_count:03d}.mp3")
-        with open(batch_audio_path, 'wb') as f:
-            f.write(accumulated_audio.getvalue())
-        
-        # 上傳到 GCS
-        upload_url = upload_to_gcs(batch_audio_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/audio_batch_{batch_count:03d}.mp3")
-        logger.info(f"✅ 音檔批次上傳：{upload_url}")
-        
-        # 送 Whisper 轉錄
-        with open(batch_audio_path, "rb") as f:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                response_format="verbose_json",
-                language=whisper_language,
-                prompt=prompt or None,
-            )
-        
-        # 處理轉錄結果
-        srt_entries = []
-        batch_duration = 0.0
-        
-        for segment in transcript.segments:
-            start_time = segment.start + time_offset
-            end_time = segment.end + time_offset
-            
-            start_str = str(timedelta(seconds=start_time))[:-3].replace('.', ',')
-            end_str = str(timedelta(seconds=end_time))[:-3].replace('.', ',')
-            
-            srt_entry = f"{start_str} --> {end_str}\n{segment.text.strip()}"
-            srt_entries.append(srt_entry)
-            
-            batch_duration = max(batch_duration, segment.end)
-        
-        logger.info(f"📝 批次 {batch_count} 轉錄完成，{len(srt_entries)} 個片段")
-        return srt_entries, batch_duration
-        
-    except Exception as e:
-        logger.error(f"音檔批次處理失敗：{e}")
-        return [], 0.0
-
 def upload_to_gcs(file_path, blob_path):
     """上傳檔案到 GCS"""
     try:
@@ -362,10 +267,11 @@ def upload_to_gcs(file_path, blob_path):
         logger.error(f"GCS 上傳失敗：{e}")
         raise
 
-def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
+# <<<--- 主要修改區域開始 --->>>
+def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt, user_email, user_name, user_headpic, user_lastname):
     logger.info(f"📥 開始使用 Transcoder 處理影片任務 {task_id}")
     logger.info(f"🌐 影片來源：{video_url}")
-    logger.info(f"👤 使用者：{user_id}")
+    logger.info(f"👤 使用者：{user_id} ({user_email})") # Log 附加 email
     logger.info(f"🌍 語言：{whisper_language}")
     logger.info(f"🎵 音檔批次大小：{AUDIO_BATCH_SIZE_MB} MB")
     logger.info(f"🔔 Webhook：{webhook_url}")
@@ -410,6 +316,7 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             raise RuntimeError("Transcoder 任務失敗或超時")
 
         # 4. 下載轉換後的音檔（Transcoder 會自動命名輸出檔案）
+        # Transcoder 的輸出檔名是 'audio_only.mp3'，這是基於我們的 MuxStream key
         output_gcs_uri = f"gs://{base_path}/transcoder/audio_only.mp3"
         audio_path = os.path.join(temp_dir, "full_audio.mp3")
         if not download_audio_from_gcs(output_gcs_uri, audio_path):
@@ -450,17 +357,22 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             srt_entries = []
             batch_duration = 0.0
             
-            for segment in transcript.segments:
-                start_time = segment.start + total_duration_offset
-                end_time = segment.end + total_duration_offset
-                
-                start_str = str(timedelta(seconds=start_time))[:-3].replace('.', ',')
-                end_str = str(timedelta(seconds=end_time))[:-3].replace('.', ',')
-                
-                srt_entry = f"{start_str} --> {end_str}\n{segment.text.strip()}"
-                srt_entries.append(srt_entry)
-                
-                batch_duration = max(batch_duration, segment.end)
+            if transcript.segments:
+              for segment in transcript.segments:
+                  start_time = segment['start'] + total_duration_offset
+                  end_time = segment['end'] + total_duration_offset
+                  
+                  start_td = timedelta(seconds=start_time)
+                  end_td = timedelta(seconds=end_time)
+                  
+                  # 格式化為 HH:MM:SS,mmm
+                  start_str = f"{int(start_td.total_seconds()) // 3600:02}:{int(start_td.total_seconds()) % 3600 // 60:02}:{int(start_td.total_seconds()) % 60:02},{start_td.microseconds // 1000:03}"
+                  end_str = f"{int(end_td.total_seconds()) // 3600:02}:{int(end_td.total_seconds()) % 3600 // 60:02}:{int(end_td.total_seconds()) % 60:02},{end_td.microseconds // 1000:03}"
+                  
+                  srt_entry = f"{start_str} --> {end_str}\n{segment['text'].strip()}"
+                  srt_entries.append(srt_entry)
+                  
+                  batch_duration = max(batch_duration, segment['end'])
             
             final_srt_parts.extend(srt_entries)
             total_duration_offset += batch_duration
@@ -472,7 +384,7 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             srt_path = os.path.join(temp_dir, "final.srt")
             with open(srt_path, "w", encoding="utf-8") as f:
                 for i, srt_entry in enumerate(final_srt_parts):
-                    f.write(f"{i + 1}\n{srt_entry}\n")
+                    f.write(f"{i + 1}\n{srt_entry}\n\n") # 確保每個 entry 後有空行
 
             srt_blob_path = f"{base_path}/srt/final.srt"
             # 移除 bucket name，因為 upload_to_gcs 會自動添加
@@ -493,6 +405,11 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
                 "總時長秒": total_duration_offset,
                 "轉換方式": "Google Transcoder API",
                 "程式版本": VERSION,
+                # <<<--- 新增的使用者資訊 --->>>
+                "user_email": user_email,
+                "user_name": user_name,
+                "user_headpic": user_headpic,
+                "user_lastname": user_lastname,
             }
 
             requests.post(webhook_url, json=payload, timeout=10)
@@ -501,7 +418,7 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             raise Exception("沒有成功處理任何音檔批次")
 
     except Exception as e:
-        logger.error(f"🔥 任務處理錯誤 - {e}")
+        logger.error(f"🔥 任務處理錯誤 - {e}", exc_info=True) # exc_info=True 可印出更詳細的 traceback
         payload = {
             "任務狀態": f"失敗: {str(e)}",
             "user_id": user_id,
@@ -510,16 +427,21 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             "whisper_language": whisper_language,
             "srt_url": "",
             "程式版本": VERSION,
+            # <<<--- 新增的使用者資訊 --->>>
+            "user_email": user_email,
+            "user_name": user_name,
+            "user_headpic": user_headpic,
+            "user_lastname": user_lastname,
         }
         try:
             requests.post(webhook_url, json=payload, timeout=10)
-        except:
-            pass
+        except Exception as webhook_e:
+            logger.error(f"🔥 發送失敗通知到 Webhook 時也發生錯誤: {webhook_e}")
     finally:
         logger.info(f"🧹 清除暫存資料夾：{temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 # 主要入口點
-def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
+def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt, user_email, user_name, user_headpic, user_lastname):
     """主要處理函數 - 使用 Google Transcoder API"""
-    return process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt)
+    return process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt, user_email, user_name, user_headpic, user_lastname)
