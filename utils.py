@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.6"
+VERSION = "v1.6.7"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -100,10 +100,12 @@ def convert_http_url_to_gcs_uri(http_url):
         logger.error(f"❌ 建立 Transcoder 任務失敗：{e}")
         return None
 
-def create_transcoder_job(input_uri, output_uri, job_id):
+def create_transcoder_job(input_uri, output_folder_uri, job_id):
     """建立 Transcoder 任務來轉換影片為 MP3"""
     try:
         logger.info(f"🎬 建立 Transcoder 任務：{job_id}")
+        logger.info(f"📥 輸入：{input_uri}")
+        logger.info(f"📤 輸出目錄：{output_folder_uri}")
         
         # 配置音檔輸出
         audio_stream = transcoder_v1.AudioStream(
@@ -123,7 +125,7 @@ def create_transcoder_job(input_uri, output_uri, job_id):
         # 配置 Job
         job = transcoder_v1.Job(
             input_uri=input_uri,
-            output_uri=output_uri,
+            output_uri=output_folder_uri,  # 這裡是輸出目錄，以斜線結尾
             config=transcoder_v1.JobConfig(
                 elementary_streams=[
                     transcoder_v1.ElementaryStream(
@@ -361,9 +363,9 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
 
         # 2. 建立 Transcoder 任務
         job_id = f"audio-extract-{user_id}-{task_id}"
-        output_gcs_uri = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/audio.mp3"
+        output_gcs_folder = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/"  # 注意結尾的斜線
         
-        transcoder_job = create_transcoder_job(input_gcs_uri, output_gcs_uri, job_id)
+        transcoder_job = create_transcoder_job(input_gcs_uri, output_gcs_folder, job_id)
         if not transcoder_job:
             raise RuntimeError("建立 Transcoder 任務失敗")
 
@@ -372,7 +374,9 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
         if not wait_for_transcoder_job(job_name):
             raise RuntimeError("Transcoder 任務失敗或超時")
 
-        # 4. 下載轉換後的音檔
+        # 4. 下載轉換後的音檔（Transcoder 會自動命名輸出檔案）
+        # 通常輸出檔案名會是 audio_only.mp3 或類似的名稱
+        output_gcs_uri = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/audio_only.mp3"
         audio_path = os.path.join(temp_dir, "full_audio.mp3")
         if not download_audio_from_gcs(output_gcs_uri, audio_path):
             raise RuntimeError("下載音檔失敗")
