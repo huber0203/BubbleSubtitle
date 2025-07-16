@@ -15,10 +15,14 @@ client = OpenAI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.3.9"
+VERSION = "v1.4.0"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
+
+
+CHUNK_SIZE_MB = 24
+CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
 
 
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
@@ -33,64 +37,53 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
 
     temp_dir = tempfile.mkdtemp()
     try:
-        video_path = os.path.join(temp_dir, "video.mp4")
-
-        logger.info("\U0001F3A7 開始直接串流影片並分割音訊...")
         headers = {"User-Agent": "Mozilla/5.0"}
         head_resp = requests.head(video_url, allow_redirects=True, headers=headers)
         total_size = int(head_resp.headers.get("Content-Length", 0))
         total_mb = round(total_size / 1024 / 1024, 2)
         logger.info(f"\U0001F4CF 影片大小（原始）：{total_mb} MB")
 
-        with requests.get(video_url, stream=True, headers=headers) as r:
-            with open(video_path, 'wb') as f:
-                shutil.copyfileobj(r.raw, f)
-
-        logger.info("✅ 影片下載完成")
-
-        # 使用 ffmpeg 分段音訊
         chunk_dir = os.path.join(temp_dir, "chunks")
         os.makedirs(chunk_dir, exist_ok=True)
 
-        bytes_per_second = 32000  # 約 32kbps mp3
-        seconds_per_chunk = (max_segment_mb * 1024 * 1024) // bytes_per_second
-        logger.info(f"⏱ 每段音訊長度估算為 {seconds_per_chunk} 秒")
+        num_chunks = (total_size + CHUNK_SIZE_BYTES - 1) // CHUNK_SIZE_BYTES
+        logger.info(f"✅ 預計切分為 {num_chunks} 段，每段 {CHUNK_SIZE_MB} MB")
 
-        chunk_pattern = os.path.join(chunk_dir, "chunk_%03d.mp3")
-        cmd = [
-            "ffmpeg", "-i", video_path,
-            "-f", "segment",
-            "-segment_time", str(seconds_per_chunk),
-            "-c:a", "libmp3lame",
-            "-ar", "44100",
-            "-b:a", "32k",
-            chunk_pattern
-        ]
+        for i in range(num_chunks):
+            start_byte = i * CHUNK_SIZE_BYTES
+            end_byte = min(start_byte + CHUNK_SIZE_BYTES - 1, total_size - 1)
+            headers["Range"] = f"bytes={start_byte}-{end_byte}"
 
-        logger.info("🔧 執行 ffmpeg 音訊切割命令...")
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+            chunk_video_path = os.path.join(temp_dir, f"chunk_{i:03d}.mp4")
+            logger.info(f"\U0001F4E6 正在下載 chunk {i+1}/{num_chunks}：{headers['Range']}")
 
-        logger.info("🔍 ffmpeg stderr：\n" + result.stderr)
-        logger.info("🔍 ffmpeg stdout：\n" + result.stdout)
+            with requests.get(video_url, headers=headers, stream=True) as r:
+                with open(chunk_video_path, "wb") as f:
+                    shutil.copyfileobj(r.raw, f)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg 分割失敗，錯誤碼 {result.returncode}")
+            logger.info(f"✅ Chunk {i+1} 下載完成：{round(os.path.getsize(chunk_video_path)/1024/1024, 2)} MB")
 
-        logger.info("✅ 音訊串流轉換與分段完成")
+            chunk_audio_path = os.path.join(temp_dir, f"chunk_{i:03d}.mp3")
+            cmd = [
+                "ffmpeg", "-y", "-i", chunk_video_path,
+                "-vn", "-acodec", "libmp3lame",
+                "-ar", "44100", "-b:a", "32k",
+                chunk_audio_path
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
-        chunks = sorted([f for f in os.listdir(chunk_dir) if f.endswith(".mp3")])
-        logger.info(f"🔍 共產出 {len(chunks)} 段音訊 chunk 檔案")
+            logger.info(f"\U0001F3B5 chunk_{i:03d}.mp3 轉檔完成")
+
+        logger.info("✅ 音訊轉換與分段全部完成")
 
         final_srt = []
         offset_ms = 0
-        for i, chunk_name in enumerate(chunks):
-            chunk_path = os.path.join(chunk_dir, chunk_name)
-            logger.info(f"\U0001F4E4 處理進度 {i+1}/{len(chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
+        audio_chunks = sorted([f for f in os.listdir(temp_dir) if f.endswith(".mp3")])
+
+        for i, chunk_name in enumerate(audio_chunks):
+            chunk_path = os.path.join(temp_dir, chunk_name)
+            logger.info(f"\U0001F4E6 處理進度 {i+1}/{len(audio_chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
+
             upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
             logger.info(f"✅ 上傳 {chunk_name} 至 GCS：{upload_url}")
 
