@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.4"
+VERSION = "v1.6.5"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -36,7 +36,19 @@ AUDIO_BATCH_SIZE_BYTES = AUDIO_BATCH_SIZE_MB * 1024 * 1024
 PROJECT_ID = "bubble-dropzone-2-pgxrk7"  # 正確的 project ID
 LOCATION = "us-central1"  # 美國中部，與 US multi-region bucket 配合
 
-def create_transcoder_job(input_uri, output_uri, job_id):
+def convert_http_url_to_gcs_uri(http_url):
+    """將 HTTP URL 轉換為 GCS URI"""
+    try:
+        # 移除 https://storage.googleapis.com/ 前綴
+        if http_url.startswith("https://storage.googleapis.com/"):
+            gcs_path = http_url.replace("https://storage.googleapis.com/", "")
+            return f"gs://{gcs_path}"
+        else:
+            # 如果不是 GCS HTTP URL，拋出錯誤
+            raise ValueError(f"URL 不是有效的 GCS HTTP URL: {http_url}")
+    except Exception as e:
+        logger.error(f"❌ URL 轉換失敗：{e}")
+        return None
     """建立 Transcoder 任務來轉換影片為 MP3"""
     try:
         logger.info(f"🎬 建立 Transcoder 任務：{job_id}")
@@ -280,7 +292,7 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
 
     temp_dir = tempfile.mkdtemp()
     try:
-        # 1. 確認影片可以訪問
+        # 1. 確認影片可以訪問並轉換為 GCS URI
         logger.info("🔍 檢查影片 URL...")
         headers = {"User-Agent": "Mozilla/5.0"}
         head_resp = requests.head(video_url, allow_redirects=True, headers=headers)
@@ -288,11 +300,18 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
         total_mb = round(total_size / 1024 / 1024, 2)
         logger.info(f"📏 影片大小：{total_mb} MB")
 
+        # 轉換 HTTP URL 為 GCS URI
+        input_gcs_uri = convert_http_url_to_gcs_uri(video_url)
+        if not input_gcs_uri:
+            raise RuntimeError(f"無法轉換影片 URL 為 GCS URI: {video_url}")
+        
+        logger.info(f"🔄 轉換後的 GCS URI：{input_gcs_uri}")
+
         # 2. 建立 Transcoder 任務
         job_id = f"audio-extract-{user_id}-{task_id}"
         output_gcs_uri = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/audio.mp3"
         
-        transcoder_job = create_transcoder_job(video_url, output_gcs_uri, job_id)
+        transcoder_job = create_transcoder_job(input_gcs_uri, output_gcs_uri, job_id)
         if not transcoder_job:
             raise RuntimeError("建立 Transcoder 任務失敗")
 
