@@ -15,14 +15,13 @@ client = OpenAI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.5.0"
+VERSION = "v1.5.1"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
-CHUNK_SIZE_MB = 50
+
+CHUNK_SIZE_MB = 24
 CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
-MAX_AUDIO_MB = 24
-MAX_AUDIO_BYTES = MAX_AUDIO_MB * 1024 * 1024
 
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
     logger.info(f"\U0001F4E5 開始處理影片任務 {task_id}")
@@ -48,12 +47,6 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         num_chunks = (total_size + CHUNK_SIZE_BYTES - 1) // CHUNK_SIZE_BYTES
         logger.info(f"✅ 預計切分為 {num_chunks} 段，每段 {CHUNK_SIZE_MB} MB")
 
-        audio_accum = []
-        accumulated_size = 0
-        final_srt = []
-        offset_ms = 0
-        whisper_count = 0
-
         for i in range(num_chunks):
             start_byte = i * CHUNK_SIZE_BYTES
             end_byte = min(start_byte + CHUNK_SIZE_BYTES - 1, total_size - 1)
@@ -77,37 +70,36 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             ]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
-            audio_size = os.path.getsize(chunk_audio_path)
-            audio_accum.append(chunk_audio_path)
-            accumulated_size += audio_size
+            logger.info(f"\U0001F3B5 chunk_{i:03d}.mp3 轉檔完成")
 
-            if accumulated_size >= MAX_AUDIO_BYTES or i == num_chunks - 1:
-                combined_audio_path = os.path.join(temp_dir, f"combined_{whisper_count:03d}.mp3")
-                with open("concat_list.txt", "w") as f:
-                    for path in audio_accum:
-                        f.write(f"file '{path}'\n")
-                subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "concat_list.txt", "-c", "copy", combined_audio_path], check=True)
-                os.remove("concat_list.txt")
+        logger.info("✅ 音訊轉換與分段全部完成")
 
-                logger.info(f"\U0001F4E6 處理 Whisper 分析 {whisper_count+1}：{round(accumulated_size/1024/1024, 2)} MB 累積音訊")
-                with open(combined_audio_path, "rb") as f:
-                    transcript = client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=f,
-                        response_format="verbose_json",
-                        language=whisper_language,
-                        prompt=prompt or None,
-                    )
+        final_srt = []
+        offset_ms = 0
+        audio_chunks = sorted([f for f in os.listdir(temp_dir) if f.endswith(".mp3")])
 
-                for segment in transcript.segments:
-                    start = str(timedelta(seconds=segment["start"] + offset_ms / 1000))[:-3].replace('.', ',')
-                    end = str(timedelta(seconds=segment["end"] + offset_ms / 1000))[:-3].replace('.', ',')
-                    final_srt.append(f"{len(final_srt)+1}\n{start} --> {end}\n{segment['text'].strip()}\n")
+        for i, chunk_name in enumerate(audio_chunks):
+            chunk_path = os.path.join(temp_dir, chunk_name)
+            logger.info(f"\U0001F4E6 處理進度 {i+1}/{len(audio_chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
 
-                offset_ms += int(transcript.segments[-1]["end"] * 1000)
-                whisper_count += 1
-                accumulated_size = 0
-                audio_accum = []
+            upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
+            logger.info(f"✅ 上傳 {chunk_name} 至 GCS：{upload_url}")
+
+            with open(chunk_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    response_format="verbose_json",
+                    language=whisper_language,
+                    prompt=prompt or None,
+                )
+
+            for segment in transcript.segments:
+                start = str(timedelta(seconds=segment.start + offset_ms / 1000))[:-3].replace('.', ',')
+                end = str(timedelta(seconds=segment.end + offset_ms / 1000))[:-3].replace('.', ',')
+                final_srt.append(f"{len(final_srt)+1}\n{start} --> {end}\n{segment.text.strip()}\n")
+
+            offset_ms += int(transcript.segments[-1].end * 1000)
 
         srt_path = os.path.join(temp_dir, "first.srt")
         with open(srt_path, "w", encoding="utf-8") as f:
@@ -124,7 +116,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "whisper_language": whisper_language,
             "srt_url": srt_url,
             "影片原始大小MB": total_mb,
-            "Whisper 請求次數": whisper_count,
+            "音訊壓縮大小MB": "N/A（ffmpeg handled）",
             "原始格式": video_url.split(".")[-1],
             "程式版本": VERSION,
         }
