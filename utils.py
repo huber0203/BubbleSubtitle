@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.5"
+VERSION = "v1.6.6"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -49,6 +49,58 @@ def convert_http_url_to_gcs_uri(http_url):
     except Exception as e:
         logger.error(f"❌ URL 轉換失敗：{e}")
         return None
+    """建立 Transcoder 任務來轉換影片為 MP3"""
+    try:
+        logger.info(f"🎬 建立 Transcoder 任務：{job_id}")
+        
+        # 配置音檔輸出
+        audio_stream = transcoder_v1.AudioStream(
+            codec="mp3",
+            bitrate_bps=128000,  # 128kbps
+            sample_rate_hertz=44100,
+            channel_count=2
+        )
+        
+        # 配置 MuxStream (只要音檔)
+        mux_stream = transcoder_v1.MuxStream(
+            key="audio_only",
+            container="mp3",
+            elementary_streams=["audio_stream"]
+        )
+        
+        # 配置 Job
+        job = transcoder_v1.Job(
+            input_uri=input_uri,
+            output_uri=output_uri,
+            config=transcoder_v1.JobConfig(
+                elementary_streams=[
+                    transcoder_v1.ElementaryStream(
+                        key="audio_stream",
+                        audio_stream=audio_stream
+                    )
+                ],
+                mux_streams=[mux_stream]
+            )
+        )
+        
+        # 建立任務請求
+        parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
+        request = transcoder_v1.CreateJobRequest(
+            parent=parent,
+            job=job
+        )
+        
+        # 建立任務
+        created_job = transcoder_client.create_job(request=request)
+        logger.info(f"✅ Transcoder 任務建立成功：{created_job.name}")
+        
+        return created_job
+        
+    except Exception as e:
+        logger.error(f"❌ 建立 Transcoder 任務失敗：{e}")
+        return None
+
+def create_transcoder_job(input_uri, output_uri, job_id):
     """建立 Transcoder 任務來轉換影片為 MP3"""
     try:
         logger.info(f"🎬 建立 Transcoder 任務：{job_id}")
