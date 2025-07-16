@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.7"
+VERSION = "v1.6.8"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -165,13 +165,24 @@ def wait_for_transcoder_job(job_name, timeout_minutes=30):
         while time.time() - start_time < timeout_seconds:
             job = transcoder_client.get_job(name=job_name)
             
-            logger.info(f"📊 任務狀態：{job.state}")
+            # 狀態對應：1=PENDING, 2=RUNNING, 3=SUCCEEDED, 4=FAILED
+            state_names = {
+                1: "PENDING",
+                2: "RUNNING", 
+                3: "SUCCEEDED",
+                4: "FAILED"
+            }
             
-            if job.state == transcoder_v1.Job.State.SUCCEEDED:
+            state_name = state_names.get(job.state, f"UNKNOWN({job.state})")
+            logger.info(f"📊 任務狀態：{state_name}")
+            
+            if job.state == 3:  # SUCCEEDED
                 logger.info("✅ Transcoder 任務完成")
                 return True
-            elif job.state == transcoder_v1.Job.State.FAILED:
-                logger.error(f"❌ Transcoder 任務失敗：{job.failure_reason}")
+            elif job.state == 4:  # FAILED
+                logger.error(f"❌ Transcoder 任務失敗")
+                if hasattr(job, 'error') and job.error:
+                    logger.error(f"錯誤詳情：{job.error}")
                 return False
             
             time.sleep(30)  # 每 30 秒檢查一次
