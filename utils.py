@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.8"
+VERSION = "v1.6.9"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -35,6 +35,23 @@ AUDIO_BATCH_SIZE_BYTES = AUDIO_BATCH_SIZE_MB * 1024 * 1024
 # Google Cloud 配置
 PROJECT_ID = "bubble-dropzone-2-pgxrk7"  # 正確的 project ID
 LOCATION = "us-central1"  # 美國中部，與 US multi-region bucket 配合
+
+def extract_base_path_from_url(video_url):
+    """從影片 URL 提取基礎路徑"""
+    try:
+        # 移除 https://storage.googleapis.com/ 前綴
+        if video_url.startswith("https://storage.googleapis.com/"):
+            gcs_path = video_url.replace("https://storage.googleapis.com/", "")
+            # 移除檔案名，保留路徑
+            # 例如：bubblebucket-a1q5lb/113102451787413814222/2025071623570213/video.mp4
+            # 變成：bubblebucket-a1q5lb/113102451787413814222/2025071623570213/
+            base_path = "/".join(gcs_path.split("/")[:-1])
+            return base_path
+        else:
+            raise ValueError(f"URL 不是有效的 GCS HTTP URL: {video_url}")
+    except Exception as e:
+        logger.error(f"❌ 提取基礎路徑失敗：{e}")
+        return None
 
 def convert_http_url_to_gcs_uri(http_url):
     """將 HTTP URL 轉換為 GCS URI"""
@@ -372,9 +389,16 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
         
         logger.info(f"🔄 轉換後的 GCS URI：{input_gcs_uri}")
 
+        # 提取基礎路徑用於組織檔案結構
+        base_path = extract_base_path_from_url(video_url)
+        if not base_path:
+            raise RuntimeError(f"無法提取基礎路徑: {video_url}")
+        
+        logger.info(f"📁 基礎路徑：{base_path}")
+
         # 2. 建立 Transcoder 任務
         job_id = f"audio-extract-{user_id}-{task_id}"
-        output_gcs_folder = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/"  # 注意結尾的斜線
+        output_gcs_folder = f"gs://{base_path}/transcoder/"  # 使用基礎路徑 + transcoder/
         
         transcoder_job = create_transcoder_job(input_gcs_uri, output_gcs_folder, job_id)
         if not transcoder_job:
@@ -386,8 +410,7 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             raise RuntimeError("Transcoder 任務失敗或超時")
 
         # 4. 下載轉換後的音檔（Transcoder 會自動命名輸出檔案）
-        # 通常輸出檔案名會是 audio_only.mp3 或類似的名稱
-        output_gcs_uri = f"gs://{BUCKET_NAME}/{user_id}/{task_id}/{TRANSCODER_FOLDER}/audio_only.mp3"
+        output_gcs_uri = f"gs://{base_path}/transcoder/audio_only.mp3"
         audio_path = os.path.join(temp_dir, "full_audio.mp3")
         if not download_audio_from_gcs(output_gcs_uri, audio_path):
             raise RuntimeError("下載音檔失敗")
@@ -407,7 +430,8 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             
             # 6.1 上傳音檔到 GCS
             chunk_name = f"audio_batch_{batch_count:03d}.mp3"
-            upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
+            chunk_blob_path = f"{base_path}/chunks/{chunk_name}"
+            upload_url = upload_to_gcs(chunk_path, chunk_blob_path)
             logger.info(f"✅ 音檔批次上傳：{upload_url}")
             
             # 6.2 送 Whisper 轉錄
@@ -448,7 +472,8 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
                 for i, srt_entry in enumerate(final_srt_parts):
                     f.write(f"{i + 1}\n{srt_entry}\n")
 
-            srt_url = upload_to_gcs(srt_path, f"{user_id}/{task_id}/{SRT_FOLDER}/final.srt")
+            srt_blob_path = f"{base_path}/srt/final.srt"
+            srt_url = upload_to_gcs(srt_path, srt_blob_path)
             logger.info(f"📄 SRT 已上傳：{srt_url}")
 
             # 8. 發送成功回應
