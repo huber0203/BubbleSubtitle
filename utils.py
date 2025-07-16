@@ -11,7 +11,7 @@ import re
 import math
 
 # ✅ utils.py 版本
-UTILS_VERSION = "v1.3.5"
+UTILS_VERSION = "v1.3.6"
 
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
@@ -22,14 +22,18 @@ client = OpenAI()
 def convert_stream_to_mp3_segments(video_url, output_dir, segment_seconds=300):
     logging.info("🎧 開始直接串流影片並分割音訊...")
     output_template = os.path.join(output_dir, "chunk_%03d.mp3")
-    (
-        ffmpeg
-        .input(video_url)
-        .output(output_template, f='segment', segment_time=segment_seconds,
-                ac=1, ar=16000, ab='32k')
-        .run(overwrite_output=True, quiet=True)
-    )
-    logging.info("✅ 音訊串流轉換與分段完成")
+    try:
+        (
+            ffmpeg
+            .input(video_url)
+            .output(output_template, f='segment', segment_time=segment_seconds,
+                    ac=1, ar=16000, ab='32k')
+            .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
+        )
+        logging.info("✅ 音訊串流轉換與分段完成")
+    except ffmpeg.Error as e:
+        logging.error(f"❌ FFmpeg 錯誤：{e.stderr.decode()}")
+        raise RuntimeError("FFmpeg 轉檔失敗")
 
 def upload_to_gcs(bucket_name, destination_blob_name, source_file_path):
     storage_client = storage.Client()
