@@ -11,7 +11,7 @@ import re
 import math
 
 # ✅ utils.py 版本
-UTILS_VERSION = "v1.3.2"
+UTILS_VERSION = "v1.3.3"
 
 # ⚙️ 設定 logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +26,7 @@ def convert_stream_to_mp3_segments(video_url, output_dir, segment_seconds=300):
         ffmpeg
         .input(video_url)
         .output(output_template, f='segment', segment_time=segment_seconds,
-                ac=1, ar=16000, ab='32k', format='mp3')
+                ac=1, ar=16000, ab='32k')
         .run(overwrite_output=True, quiet=True)
     )
     logging.info("✅ 音訊串流轉換與分段完成")
