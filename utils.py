@@ -1,209 +1,161 @@
 import os
 import tempfile
-import requests
+import shutil
 import logging
-from urllib.parse import urlparse
-from google.cloud import storage
-import ffmpeg
-from openai import OpenAI
-from datetime import timedelta, datetime
-import re
+import requests
+from datetime import timedelta
 from pydub import AudioSegment
+from google.cloud import storage
+from openai import OpenAI
 
-# ✅ utils.py 版本
-UTILS_VERSION = "v1.3.7"
-
-# ⚙️ 設定 logging
-logging.basicConfig(level=logging.INFO)
-
-# ✅ 初始化 OpenAI client（新版 API）
+# 初始化 OpenAI client
 client = OpenAI()
 
-def stream_and_convert_to_mp3(video_url, output_path):
-    logging.info("🎧 開始直接串流影片並轉換音訊...")
-    try:
-        (
-            ffmpeg
-            .input(video_url)
-            .output(output_path, format='mp3', ac=1, ar=16000, ab='32k')
-            .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
-        )
-        logging.info("✅ 音訊串流轉換完成")
-    except ffmpeg.Error as e:
-        logging.error(f"❌ FFmpeg 錯誤：{e.stderr.decode()}")
-        raise RuntimeError("FFmpeg 轉檔失敗")
+# 初始化 logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def split_audio_by_size(input_path, output_dir, max_segment_mb):
-    logging.info("🔪 根據大小分割音訊...")
-    audio = AudioSegment.from_file(input_path)
-    max_bytes = max_segment_mb * 1024 * 1024
-    chunks = []
-    start_ms = 0
-    total_ms = len(audio)
-    part = 0
+VERSION = "v1.3.7"
+BUCKET_NAME = "bubblebucket-a1q5lb"
+CHUNK_FOLDER = "chunks"
+SRT_FOLDER = "srt"
 
-    while start_ms < total_ms:
-        end_ms = total_ms
-        while end_ms > start_ms:
-            chunk = audio[start_ms:end_ms]
-            if len(chunk.raw_data) <= max_bytes:
-                break
-            end_ms -= 1000  # 每次少 1 秒
-
-        chunk_path = os.path.join(output_dir, f"chunk_{part:03d}.mp3")
-        chunk.export(chunk_path, format="mp3", bitrate="32k")
-        chunks.append(chunk_path)
-        logging.info(f"📦 預覽分段 {part+1}：{round(len(chunk.raw_data)/1024/1024,2)} MB")
-        start_ms = end_ms
-        part += 1
-
-    return chunks
-
-def upload_to_gcs(bucket_name, destination_blob_name, source_file_path):
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-    blob.upload_from_filename(source_file_path, content_type="application/x-subrip" if source_file_path.endswith(".srt") else None)
-    blob.make_public()
-    return blob.public_url
-
-def transcribe_audio(file_path, language, prompt):
-    logging.info(f"🧠 上傳至 Whisper 分析中...：{file_path}")
-    with open(file_path, "rb") as f:
-        result = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-            language=language,
-            response_format="srt",
-            prompt=prompt if prompt else None
-        )
-        return result, None
-
-def get_video_info(url):
-    try:
-        head = requests.head(url, allow_redirects=True)
-        size_bytes = int(head.headers.get("content-length", 0))
-        ext = os.path.splitext(urlparse(url).path)[-1].lstrip(".")
-        return size_bytes, ext
-    except:
-        return 0, ""
-
-def get_audio_duration(filepath):
-    try:
-        probe = ffmpeg.probe(filepath)
-        return float(probe["format"]["duration"])
-    except Exception:
-        return 0
 
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
-    logging.info(f"📥 開始處理影片任務 {task_id}")
-    logging.info(f"🌐 影片來源：{video_url}")
-    logging.info(f"👤 使用者：{user_id}")
-    logging.info(f"🌍 語言：{whisper_language}")
-    logging.info(f"📦 Chunk 上限：{max_segment_mb} MB")
-    logging.info(f"🔔 Webhook：{webhook_url}")
-    logging.info(f"📝 提示詞：{prompt}")
-    logging.info(f"🧪 程式版本：{UTILS_VERSION}")
+    logger.info(f"\U0001F4E5 開始處理影片任務 {task_id}")
+    logger.info(f"\U0001F310 影片來源：{video_url}")
+    logger.info(f"\U0001F464 使用者：{user_id}")
+    logger.info(f"\U0001F30D 語言：{whisper_language}")
+    logger.info(f"\U0001F4E6 Chunk 上限：{max_segment_mb} MB")
+    logger.info(f"\U0001F514 Webhook：{webhook_url}")
+    logger.info(f"\U0001F4DD 提示詞：{prompt}")
+    logger.info(f"\U0001F9EA 程式版本：{VERSION}")
 
-    status = "成功"
-    srt_url = ""
-    output_srt = ""
-    video_duration = 0
-    original_file_size_mb = 0
-    original_file_format = ""
-    compressed_audio_size_mb = 0
-
+    temp_dir = tempfile.mkdtemp()
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            logging.info(f"📁 建立暫存資料夾：{tmpdir}")
-            full_audio_path = os.path.join(tmpdir, "full_audio.mp3")
+        audio_path = os.path.join(temp_dir, "audio.mp3")
 
-            stream_and_convert_to_mp3(video_url, full_audio_path)
+        logger.info("\U0001F3A7 開始直接串流影片並分割音訊...")
+        headers = {"User-Agent": "Mozilla/5.0"}
+        head_resp = requests.head(video_url, allow_redirects=True, headers=headers)
+        total_size = int(head_resp.headers.get("Content-Length", 0))
+        total_mb = round(total_size / 1024 / 1024, 2)
+        logger.info(f"\U0001F4CF 影片大小（原始）：{total_mb} MB")
 
-            original_file_size_bytes, original_file_format = get_video_info(video_url)
-            original_file_size_mb = round(original_file_size_bytes / 1024 / 1024, 2)
+        with requests.get(video_url, stream=True, headers=headers) as r:
+            with open(os.path.join(temp_dir, "video.mp4"), 'wb') as f:
+                shutil.copyfileobj(r.raw, f)
 
-            audio_chunks = split_audio_by_size(full_audio_path, tmpdir, max_segment_mb)
-            total_chunks = len(audio_chunks)
+        logger.info("\u2705 影片下載完成")
+        logger.info("\U0001F3A7 轉換音訊中...")
+        audio = AudioSegment.from_file(os.path.join(temp_dir, "video.mp4"))
+        audio.export(audio_path, format="mp3")
 
-            compressed_audio_size_mb = round(sum(os.path.getsize(p) for p in audio_chunks) / 1024 / 1024, 2)
+        compressed_size = round(os.path.getsize(audio_path) / 1024 / 1024, 2)
+        logger.info(f"\U0001F4CA 音訊壓縮後大小：{compressed_size} MB")
 
-            logging.info(f"📏 影片大小（原始）：{original_file_size_mb} MB")
-            logging.info(f"📊 音訊壓縮後大小：{compressed_audio_size_mb} MB")
-            logging.info(f"🧩 預計切成 {total_chunks} 段，每段上限：{max_segment_mb} MB")
+        audio = AudioSegment.from_mp3(audio_path)
+        max_bytes = max_segment_mb * 1024 * 1024
 
-            bucket_name = "bubblebucket-a1q5lb"
-            path_parts = urlparse(video_url).path.lstrip("/").split("/")
-            object_path = "/".join(path_parts[1:-1])
+        chunks = []
+        start_ms = 0
+        i = 0
+        while start_ms < len(audio):
+            end_ms = len(audio)
+            for j in range(start_ms + 10000, len(audio), 1000):
+                if len(audio[start_ms:j].raw_data) > max_bytes:
+                    end_ms = j - 1000
+                    break
+            chunk = audio[start_ms:end_ms]
+            chunk_name = f"chunk_{i:03}.mp3"
+            chunk_path = os.path.join(temp_dir, chunk_name)
+            chunk.export(chunk_path, format="mp3")
+            chunks.append((chunk_path, chunk_name, start_ms))
+            logger.info(f"\U0001F4E6 處理進度 {i+1}/{len(audio)//(end_ms-start_ms)}：{chunk_name}（目標大小：{max_segment_mb} MB，實際大小：{round(os.path.getsize(chunk_path)/1024/1024,2)} MB）")
+            start_ms = end_ms
+            i += 1
 
-            base_time = 0
-            for idx, chunk_path in enumerate(audio_chunks):
-                actual_size = round(os.path.getsize(chunk_path)/1024/1024, 2)
-                logging.info(f"📦 處理進度 {idx+1}/{total_chunks}：{os.path.basename(chunk_path)}（目標大小：{max_segment_mb} MB，實際大小：{actual_size} MB）")
+        logger.info("\u2705 音訊串流轉換與分段完成")
 
-                gcs_path = f"{object_path}/chunks/{task_id}_{os.path.basename(chunk_path)}"
-                gcs_url = upload_to_gcs(bucket_name, gcs_path, chunk_path)
-                logging.info(f"✅ 上傳 {os.path.basename(chunk_path)} 至 GCS：{gcs_url}")
+        final_srt = []
+        full_usage = {
+            "type": "tokens",
+            "input_tokens": 0,
+            "input_token_details": {"text_tokens": 0, "audio_tokens": 0},
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
 
-                try:
-                    srt_text, _ = transcribe_audio(chunk_path, whisper_language, prompt)
-                    updated_srt = shift_srt_timestamps(srt_text, base_time)
-                    output_srt += updated_srt + "\n"
-                    chunk_duration = get_audio_duration(chunk_path)
-                    base_time += chunk_duration
-                    video_duration += chunk_duration
-                except Exception as e:
-                    status = f"失敗: Whisper 分析失敗 - {str(e)}"
-                    logging.error(status)
+        for idx, (chunk_path, chunk_name, offset_ms) in enumerate(chunks):
+            logger.info(f"\U0001F4E4 發現並處理 {chunk_name}（{round(os.path.getsize(chunk_path)/1024/1024,2)} MB）")
+            upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
+            logger.info(f"\u2705 上傳 {chunk_name} 至 GCS：{upload_url}")
 
-            final_srt_path = os.path.join(tmpdir, "first.srt")
-            with open(final_srt_path, "w", encoding="utf-8-sig") as f:
-                f.write(output_srt.strip())
+            logger.info(f"\U0001F9E0 上傳至 Whisper 分析中...：{chunk_path}")
+            with open(chunk_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    response_format="verbose_json",
+                    language=whisper_language,
+                    prompt=prompt or None,
+                )
 
-            try:
-                srt_gcs_path = f"{object_path}/srt/first.srt"
-                srt_url = upload_to_gcs(bucket_name, srt_gcs_path, final_srt_path)
-                logging.info(f"📄 SRT 已上傳至 GCS：{srt_url}")
-            except Exception as e:
-                status = f"失敗: 上傳 SRT 失敗 - {str(e)}"
-                logging.error(status)
-    except Exception as e:
-        status = f"失敗: 任務處理錯誤 - {str(e)}"
-        logging.error(status)
+            for segment in transcript.segments:
+                start = str(timedelta(seconds=segment["start"] + offset_ms / 1000))[:-3].replace('.', ',')
+                end = str(timedelta(seconds=segment["end"] + offset_ms / 1000))[:-3].replace('.', ',')
+                final_srt.append(f"{len(final_srt)+1}\n{start} --> {end}\n{segment['text'].strip()}\n")
 
-    logging.info("📬 發送 Webhook 回傳...")
-    try:
-        response = requests.post(webhook_url, json={
-            "任務狀態": status,
+        srt_path = os.path.join(temp_dir, "first.srt")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(final_srt))
+
+        srt_url = upload_to_gcs(srt_path, f"{user_id}/{task_id}/{SRT_FOLDER}/first.srt")
+        logger.info(f"\U0001F4C4 SRT 已上傳至 GCS：{srt_url}")
+
+        payload = {
+            "任務狀態": "成功",
             "user_id": user_id,
             "task_id": task_id,
             "video_url": video_url,
             "whisper_language": whisper_language,
             "srt_url": srt_url,
-            "video_duration": round(video_duration, 2),
-            "original_file_size_mb": original_file_size_mb,
-            "original_file_format": original_file_format,
-            "compressed_audio_size_mb": compressed_audio_size_mb
-        })
-        logging.info(f"✅ Webhook 已送出，狀態碼 {response.status_code}")
+            "影片原始大小MB": total_mb,
+            "音訊壓縮大小MB": compressed_size,
+            "原始格式": video_url.split(".")[-1],
+            "程式版本": VERSION,
+        }
+
+        logger.info("\U0001F4EC 發送 Webhook 回傳...")
+        requests.post(webhook_url, json=payload, timeout=10)
+        logger.info("\u2705 Webhook 已送出")
+
     except Exception as e:
-        logging.error(f"❌ Webhook 發送失敗：{e}")
+        logger.error(f"\U0001F525 任務處理錯誤 - {e}")
+        payload = {
+            "任務狀態": f"失敗: 任務處理錯誤 - {str(e)}",
+            "user_id": user_id,
+            "task_id": task_id,
+            "video_url": video_url,
+            "whisper_language": whisper_language,
+            "srt_url": "",
+            "程式版本": VERSION,
+        }
+        try:
+            logger.info("\U0001F4EC 發送 Webhook 回傳...")
+            requests.post(webhook_url, json=payload, timeout=10)
+            logger.info("\u2705 Webhook 已送出")
+        except:
+            pass
+    finally:
+        logger.info(f"\U0001F9F9 清除暫存資料夾：{temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-def shift_srt_timestamps(srt_text, base_seconds):
-    def parse_time(s):
-        return datetime.strptime(s, "%H:%M:%S,%f")
 
-    def format_time(t):
-        return t.strftime("%H:%M:%S,%f")[:-3]
-
-    updated_lines = []
-    for line in srt_text.splitlines():
-        match = re.match(r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})", line)
-        if match:
-            start, end = match.groups()
-            start_dt = parse_time(start) + timedelta(seconds=base_seconds)
-            end_dt = parse_time(end) + timedelta(seconds=base_seconds)
-            updated_lines.append(f"{format_time(start_dt)} --> {format_time(end_dt)}")
-        else:
-            updated_lines.append(line)
-    return "\n".join(updated_lines)
+def upload_to_gcs(file_path, blob_path):
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+    blob = bucket.blob(blob_path)
+    content_type = "application/x-subrip" if file_path.endswith(".srt") else "audio/mpeg"
+    blob.upload_from_filename(file_path, content_type=content_type)
+    return f"https://storage.googleapis.com/{BUCKET_NAME}/{blob_path}"
