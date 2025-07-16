@@ -522,7 +522,19 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
 # 主要入口點
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt, user_email=None, user_name=None, user_lastname=None, user_headpic=None):
     """主要處理函數 - 使用 Google Transcoder API"""
-    result = process_video_task_with_transcoder(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt, user_email)
+    result = process_video_task_with_transcoder(
+        video_url,
+        user_id,
+        task_id,
+        whisper_language,
+        max_segment_mb,
+        webhook_url,
+        prompt,
+        user_email,
+        user_name,
+        user_lastname,
+        user_headpic
+    )
 
     # 合併額外欄位進 webhook payload（模擬結果中回傳）
     if isinstance(result, dict):
