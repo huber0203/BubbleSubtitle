@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.9"
+VERSION = "v1.6.10"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -431,7 +431,9 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             # 6.1 上傳音檔到 GCS
             chunk_name = f"audio_batch_{batch_count:03d}.mp3"
             chunk_blob_path = f"{base_path}/chunks/{chunk_name}"
-            upload_url = upload_to_gcs(chunk_path, chunk_blob_path)
+            # 移除 bucket name，因為 upload_to_gcs 會自動添加
+            chunk_blob_path_clean = chunk_blob_path.replace(f"{BUCKET_NAME}/", "")
+            upload_url = upload_to_gcs(chunk_path, chunk_blob_path_clean)
             logger.info(f"✅ 音檔批次上傳：{upload_url}")
             
             # 6.2 送 Whisper 轉錄
@@ -473,7 +475,9 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
                     f.write(f"{i + 1}\n{srt_entry}\n")
 
             srt_blob_path = f"{base_path}/srt/final.srt"
-            srt_url = upload_to_gcs(srt_path, srt_blob_path)
+            # 移除 bucket name，因為 upload_to_gcs 會自動添加
+            srt_blob_path_clean = srt_blob_path.replace(f"{BUCKET_NAME}/", "")
+            srt_url = upload_to_gcs(srt_path, srt_blob_path_clean)
             logger.info(f"📄 SRT 已上傳：{srt_url}")
 
             # 8. 發送成功回應
