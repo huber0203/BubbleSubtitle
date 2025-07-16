@@ -22,7 +22,7 @@ transcoder_client = transcoder_v1.TranscoderServiceClient()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.6.3"
+VERSION = "v1.6.4"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -67,25 +67,22 @@ def create_transcoder_job(input_uri, output_uri, job_id):
                         audio_stream=audio_stream
                     )
                 ],
-                mux_streams=[mux_stream],
-                output=transcoder_v1.Output(
-                    uri=output_uri
-                )
+                mux_streams=[mux_stream]
             )
         )
         
-        # 建立任務
+        # 建立任務請求
         parent = f"projects/{PROJECT_ID}/locations/{LOCATION}"
         request = transcoder_v1.CreateJobRequest(
             parent=parent,
-            job=job,
-            job_id=job_id
+            job=job
         )
         
-        operation = transcoder_client.create_job(request=request)
-        logger.info(f"✅ Transcoder 任務建立成功：{operation.name}")
+        # 建立任務
+        created_job = transcoder_client.create_job(request=request)
+        logger.info(f"✅ Transcoder 任務建立成功：{created_job.name}")
         
-        return operation
+        return created_job
         
     except Exception as e:
         logger.error(f"❌ 建立 Transcoder 任務失敗：{e}")
@@ -300,7 +297,7 @@ def process_video_task_with_transcoder(video_url, user_id, task_id, whisper_lang
             raise RuntimeError("建立 Transcoder 任務失敗")
 
         # 3. 等待 Transcoder 完成
-        job_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/jobs/{job_id}"
+        job_name = transcoder_job.name
         if not wait_for_transcoder_job(job_name):
             raise RuntimeError("Transcoder 任務失敗或超時")
 
