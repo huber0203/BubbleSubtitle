@@ -15,7 +15,7 @@ client = OpenAI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.5.1"
+VERSION = "v1.5.2"
 BUCKET_NAME = "bubblebucket-a1q5lb"
 CHUNK_FOLDER = "chunks"
 SRT_FOLDER = "srt"
@@ -24,14 +24,14 @@ CHUNK_SIZE_MB = 24
 CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
 
 def process_video_task(video_url, user_id, task_id, whisper_language, max_segment_mb, webhook_url, prompt):
-    logger.info(f"\U0001F4E5 開始處理影片任務 {task_id}")
-    logger.info(f"\U0001F310 影片來源：{video_url}")
-    logger.info(f"\U0001F464 使用者：{user_id}")
-    logger.info(f"\U0001F30D 語言：{whisper_language}")
-    logger.info(f"\U0001F4E6 Chunk 上限：{max_segment_mb} MB")
-    logger.info(f"\U0001F514 Webhook：{webhook_url}")
-    logger.info(f"\U0001F4DD 提示詞：{prompt}")
-    logger.info(f"\U0001F9EA 程式版本：{VERSION}")
+    logger.info(f"📥 開始處理影片任務 {task_id}")
+    logger.info(f"🌐 影片來源：{video_url}")
+    logger.info(f"👤 使用者：{user_id}")
+    logger.info(f"🌍 語言：{whisper_language}")
+    logger.info(f"📦 Chunk 上限：{max_segment_mb} MB")
+    logger.info(f"🔔 Webhook：{webhook_url}")
+    logger.info(f"📝 提示詞：{prompt}")
+    logger.info(f"🧪 程式版本：{VERSION}")
 
     temp_dir = tempfile.mkdtemp()
     try:
@@ -39,7 +39,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         head_resp = requests.head(video_url, allow_redirects=True, headers=headers)
         total_size = int(head_resp.headers.get("Content-Length", 0))
         total_mb = round(total_size / 1024 / 1024, 2)
-        logger.info(f"\U0001F4CF 影片大小（原始）：{total_mb} MB")
+        logger.info(f"📏 影片大小（原始）：{total_mb} MB")
 
         chunk_dir = os.path.join(temp_dir, "chunks")
         os.makedirs(chunk_dir, exist_ok=True)
@@ -53,24 +53,28 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             headers["Range"] = f"bytes={start_byte}-{end_byte}"
 
             chunk_video_path = os.path.join(temp_dir, f"chunk_{i:03d}.mp4")
-            logger.info(f"\U0001F4E6 正在下載 chunk {i+1}/{num_chunks}：{headers['Range']}")
+            logger.info(f"📦 正在下載 chunk {i+1}/{num_chunks}：{headers['Range']}")
 
             with requests.get(video_url, headers=headers, stream=True) as r:
                 with open(chunk_video_path, "wb") as f:
                     shutil.copyfileobj(r.raw, f)
 
-            logger.info(f"✅ Chunk {i+1} 下載完成：{round(os.path.getsize(chunk_video_path)/1024/1024, 2)} MB")
+            size_mb = round(os.path.getsize(chunk_video_path)/1024/1024, 2)
+            logger.info(f"✅ Chunk {i+1} 下載完成：{size_mb} MB")
 
             chunk_audio_path = os.path.join(temp_dir, f"chunk_{i:03d}.mp3")
             cmd = [
-                "ffmpeg", "-y", "-i", chunk_video_path,
+                "ffmpeg", "-y", "-fflags", "+discardcorrupt", "-i", chunk_video_path,
                 "-vn", "-acodec", "libmp3lame",
                 "-ar", "44100", "-b:a", "32k",
                 chunk_audio_path
             ]
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                logger.error(f"ffmpeg 轉檔失敗：{result.stderr}")
+                raise RuntimeError(f"ffmpeg error: {result.stderr}")
 
-            logger.info(f"\U0001F3B5 chunk_{i:03d}.mp3 轉檔完成")
+            logger.info(f"🎵 chunk_{i:03d}.mp3 轉檔完成")
 
         logger.info("✅ 音訊轉換與分段全部完成")
 
@@ -80,7 +84,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
 
         for i, chunk_name in enumerate(audio_chunks):
             chunk_path = os.path.join(temp_dir, chunk_name)
-            logger.info(f"\U0001F4E6 處理進度 {i+1}/{len(audio_chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
+            logger.info(f"📦 處理進度 {i+1}/{len(audio_chunks)}：{chunk_name}（大小：{round(os.path.getsize(chunk_path)/1024/1024, 2)} MB）")
 
             upload_url = upload_to_gcs(chunk_path, f"{user_id}/{task_id}/{CHUNK_FOLDER}/{chunk_name}")
             logger.info(f"✅ 上傳 {chunk_name} 至 GCS：{upload_url}")
@@ -106,7 +110,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             f.write("\n".join(final_srt))
 
         srt_url = upload_to_gcs(srt_path, f"{user_id}/{task_id}/{SRT_FOLDER}/first.srt")
-        logger.info(f"\U0001F4C4 SRT 已上傳至 GCS：{srt_url}")
+        logger.info(f"📄 SRT 已上傳至 GCS：{srt_url}")
 
         payload = {
             "任務狀態": "成功",
@@ -121,12 +125,12 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "程式版本": VERSION,
         }
 
-        logger.info("\U0001F4EC 發送 Webhook 回傳...")
+        logger.info("📬 發送 Webhook 回傳...")
         requests.post(webhook_url, json=payload, timeout=10)
         logger.info("✅ Webhook 已送出")
 
     except Exception as e:
-        logger.error(f"\U0001F525 任務處理錯誤 - {e}")
+        logger.error(f"🔥 任務處理錯誤 - {e}")
         payload = {
             "任務狀態": f"失敗: 任務處理錯誤 - {str(e)}",
             "user_id": user_id,
@@ -137,13 +141,13 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             "程式版本": VERSION,
         }
         try:
-            logger.info("\U0001F4EC 發送 Webhook 回傳...")
+            logger.info("📬 發送 Webhook 回傳...")
             requests.post(webhook_url, json=payload, timeout=10)
             logger.info("✅ Webhook 已送出")
         except:
             pass
     finally:
-        logger.info(f"\U0001F9F9 清除暫存資料夾：{temp_dir}")
+        logger.info(f"🧹 清除暫存資料夾：{temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def upload_to_gcs(file_path, blob_path):
