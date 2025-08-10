@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- 常數設定 ---
-VERSION = "v1.6.14" # 版本號更新
+VERSION = "v1.6.15" # 版本號更新
 BUCKET_NAME = "bubblebucket-a1q5lb"
 PROJECT_ID = "bubble-dropzone-2-pgxrk7"
 LOCATION = "us-central1"
@@ -75,12 +75,10 @@ def wait_for_transcoder_job(job_name, timeout_minutes=30):
     while time.time() - start_time < timeout_minutes * 60:
         job = transcoder_client.get_job(name=job_name)
         
-        # 狀態對應：1=PENDING, 2=RUNNING, 3=SUCCEEDED, 4=FAILED
         state_names = {1: "PENDING", 2: "RUNNING", 3: "SUCCEEDED", 4: "FAILED"}
         state_name = state_names.get(job.state, f"UNKNOWN({job.state})")
         logger.info(f"📊 任務狀態：{state_name}")
 
-        # --- 修正：使用數字來判斷狀態 ---
         if job.state == 3: # SUCCEEDED
             logger.info("✅ Transcoder 任務完成")
             return True
@@ -159,14 +157,15 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             with open(chunk_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(model="whisper-1", file=f, response_format="verbose_json", language=whisper_language, prompt=prompt or None)
             
+            # --- 修正：使用物件語法 .key 來存取屬性 ---
             for segment in transcript.segments:
-                start_time = segment['start'] + total_duration_offset
-                end_time = segment['end'] + total_duration_offset
+                start_time = segment.start + total_duration_offset
+                end_time = segment.end + total_duration_offset
                 
                 start_str = format_srt_time(start_time)
                 end_str = format_srt_time(end_time)
                 
-                text = segment['text'].strip()
+                text = segment.text.strip()
                 final_srt_parts.append((start_str, end_str, text))
             
             chunk_duration = get_audio_duration(chunk_path)
