@@ -4,7 +4,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 複製當前目錄的所有檔案到容器中
-COPY . .
+COPY ./scripts/ /app/
 
 # 安裝 ffmpeg 及 Python 套件
 RUN apt-get update && \
