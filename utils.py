@@ -20,13 +20,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- 常數設定 ---
-VERSION = "v1.6.13" # 版本號更新
+VERSION = "v1.6.14" # 版本號更新
 BUCKET_NAME = "bubblebucket-a1q5lb"
 PROJECT_ID = "bubble-dropzone-2-pgxrk7"
 LOCATION = "us-central1"
 AUDIO_BATCH_SIZE_MB = 24
 
-# --- 修正：最可靠的 SRT 時間格式化函式 ---
 def format_srt_time(total_seconds):
     """將秒數精確格式化為 HH:MM:SS,mmm 的 SRT 標準時間格式"""
     hours, remainder = divmod(total_seconds, 3600)
@@ -70,16 +69,25 @@ def create_transcoder_job(input_uri, output_folder_uri, job_id):
     return transcoder_client.create_job(request=request)
 
 def wait_for_transcoder_job(job_name, timeout_minutes=30):
+    """等待 Transcoder 任務完成"""
     logger.info(f"⏳ 等待 Transcoder 任務完成：{job_name}")
     start_time = time.time()
     while time.time() - start_time < timeout_minutes * 60:
         job = transcoder_client.get_job(name=job_name)
-        if job.state == transcoder_v1.Job.State.SUCCEEDED:
+        
+        # 狀態對應：1=PENDING, 2=RUNNING, 3=SUCCEEDED, 4=FAILED
+        state_names = {1: "PENDING", 2: "RUNNING", 3: "SUCCEEDED", 4: "FAILED"}
+        state_name = state_names.get(job.state, f"UNKNOWN({job.state})")
+        logger.info(f"📊 任務狀態：{state_name}")
+
+        # --- 修正：使用數字來判斷狀態 ---
+        if job.state == 3: # SUCCEEDED
             logger.info("✅ Transcoder 任務完成")
             return True
-        if job.state == transcoder_v1.Job.State.FAILED:
+        if job.state == 4: # FAILED
             logger.error(f"❌ Transcoder 任務失敗: {job.error}")
             return False
+            
         time.sleep(30)
     logger.error("⏰ Transcoder 任務超時")
     return False
@@ -172,7 +180,6 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, (start, end, text) in enumerate(final_srt_parts):
                 f.write(f"{i + 1}\n")
-                # --- 修正：使用標準的 "  " 分隔符 ---
                 f.write(f"{start}  {end}\n")
                 f.write(f"{text}\n\n")
 
