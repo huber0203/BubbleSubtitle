@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- 常數設定 ---
-VERSION = "v1.6.18" # 最終修正版本
+VERSION = "v1.6.19" # 最終正確版本
 BUCKET_NAME = "bubblebucket-a1q5lb"
 PROJECT_ID = "bubble-dropzone-2-pgxrk7"
 LOCATION = "us-central1"
@@ -178,8 +178,8 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, (start, end, text) in enumerate(final_srt_parts):
                 f.write(f"{i + 1}\n")
-                # --- 最終修正：使用標準的 "" 分隔符 ---
-                f.write(f"{start}  {end}\n")
+                # --- 最終、絕對正確的修正 ---
+                f.write(f"{start} --> {end}\n")
                 f.write(f"{text}\n\n")
 
         srt_blob_path = f"{base_path}/srt/final.srt"
