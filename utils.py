@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- 常數設定 ---
-VERSION = "v1.6.15" # 版本號更新
+VERSION = "v1.6.16" # 版本號更新
 BUCKET_NAME = "bubblebucket-a1q5lb"
 PROJECT_ID = "bubble-dropzone-2-pgxrk7"
 LOCATION = "us-central1"
@@ -157,7 +157,6 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
             with open(chunk_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(model="whisper-1", file=f, response_format="verbose_json", language=whisper_language, prompt=prompt or None)
             
-            # --- 修正：使用物件語法 .key 來存取屬性 ---
             for segment in transcript.segments:
                 start_time = segment.start + total_duration_offset
                 end_time = segment.end + total_duration_offset
@@ -179,6 +178,7 @@ def process_video_task(video_url, user_id, task_id, whisper_language, max_segmen
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, (start, end, text) in enumerate(final_srt_parts):
                 f.write(f"{i + 1}\n")
+                # --- 修正：使用標準的 "  " 分隔符 ---
                 f.write(f"{start}  {end}\n")
                 f.write(f"{text}\n\n")
 
